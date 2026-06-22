@@ -18,7 +18,7 @@ Echo Recall is a lightweight but powerful revision engine for Obsidian. It turns
 
 **The Solution:** Echo Recall fixes this problem. It brings the testing environment directly to your notes. Just open a note and click "**[▶ echo]**" in the top right. Follow the instructions on the screen. That's it! You have reviewed your note.
 
-For scheduling, this plugin uses spaced repetition. It also uses a "retrospective revision" schedule based on your deadlines. This idea was [conceptualized by Ali Abdaal](https://www.youtube.com/watch?v=b7o09a7t4RA&t=ygUUYWxpIGFiZGFhbCByZXZpc2lvbiDSBwkJPwsBhyohjO8%3D).
+For scheduling, this plugin uses spaced repetition. It also uses a "retrospective revision" schedule based on your deadlines. This idea was [conceptualized by Ali Abdaal](https://youtu.be/b7o09a7t4RA?t=9).
 
 ---
 
