@@ -1,6 +1,6 @@
 # Echo Recall
 
-> **Memorize your notes and paragraphs actively with spaced repetition and retrospective deadlines directly inside Obsidian.**
+> **Memorize your notes and paragraphs actively with spaced repetition and retrospective revision timetable directly inside Obsidian.**
 
 ![Banner](https://raw.githubusercontent.com/sajee05/echo-recall/main/banner.png)
 
@@ -18,7 +18,7 @@ Echo Recall is a lightweight but powerful revision engine for Obsidian. It turns
 
 **The Solution:** Echo Recall fixes this problem. It brings the testing environment directly to your notes. Just open a note and click "**[▶ echo]**" in the top right. Follow the instructions on the screen. That's it! You have reviewed your note.
 
-For scheduling, this plugin uses spaced repetition. It also uses a "retrospective revision" schedule based on your deadlines. This idea was [conceptualized by Ali Abdaal](https://aliabdaal.com/retrospective-revision-timetable/).
+For scheduling, this plugin uses spaced repetition. It also uses a "retrospective revision" schedule based on your deadlines. This idea was [conceptualized by Ali Abdaal](https://www.youtube.com/watch?v=b7o09a7t4RA&t=193s&pp=ygUUYWxpIGFiZGFhbCByZXZpc2lvbiDSBwkJPwsBhyohjO8%3D).
 
 ---
 
