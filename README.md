@@ -2,7 +2,7 @@
 
 > **Memorize your notes and paragraphs actively with spaced repetition and retrospective revision timetable directly inside Obsidian.**
 
-![Banner](https://raw.githubusercontent.com/sajee05/echo-recall/main/banner.png)
+![screenshots](https://raw.githubusercontent.com/sajee05/echo-recall/main/main.png)
 
 ![Obsidian](https://img.shields.io/badge/Obsidian-v1.4.0+-483699.svg?style=for-the-badge&logo=obsidian&logoColor=white)
 ![Release](https://img.shields.io/badge/Release-v1.0.0-success.svg?style=for-the-badge)
@@ -141,3 +141,5 @@ Is your confidence marked "Hard" or "Moderate"? Are you running out of time befo
 Days = Math.max(1, Math.floor(DaysRemaining * 0.5))
 ```
 *Example:* A "Moderate" note usually waits 7 days. But what if your exam is in 4 days? The plugin cuts the wait to 2 days (`4 * 0.5`). You will safely review it before the test.
+
+![Banner](https://raw.githubusercontent.com/sajee05/echo-recall/main/banner.png)
