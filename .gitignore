@@ -1,0 +1,4 @@
+node_modules/
+package-lock.json
+llm_output.txt
+.DS_Store

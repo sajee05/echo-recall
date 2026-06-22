@@ -1,0 +1,9 @@
+{
+  "id": "echo-recall",
+  "name": "Echo Recall",
+  "version": "1.0.0",
+  "minAppVersion": "1.1.0",
+  "description": "3-step progressive text memorization and spaced repetition.",
+  "author": "sxjeel",
+  "isDesktopOnly": false
+}
