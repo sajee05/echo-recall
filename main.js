@@ -32,7 +32,8 @@ var DEFAULT_SETTINGS = {
   excludeInternalLinks: true,
   excludeExternalLinks: true,
   excludeEmbeds: true,
-  customRegex: ""
+  customRegex: "",
+  enableQuickLook: true
 };
 function getToday() {
   return window.moment().format("YYYY-MM-DD");
@@ -83,6 +84,7 @@ var RevisionItemView = class extends import_obsidian.ItemView {
   scrollPos = 0;
   confidence = "Hard";
   originalTexts = /* @__PURE__ */ new WeakMap();
+  isDomWrapped = false;
   headerTitle;
   headerCount;
   topDirective;
@@ -150,6 +152,7 @@ var RevisionItemView = class extends import_obsidian.ItemView {
     this.currentStep = 1;
     this.scrollPos = 0;
     this.originalTexts = /* @__PURE__ */ new WeakMap();
+    this.isDomWrapped = false;
     const file = this.queue[this.currentIndex];
     const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
     this.confidence = fm?.echo_confidence || "Hard";
@@ -163,21 +166,21 @@ var RevisionItemView = class extends import_obsidian.ItemView {
   }
   updateStepUI() {
     if (this.currentStep === 1) {
-      this.topDirective.innerHTML = "<span>Firstly, <strong style='color: var(--text-error)'>say it</strong> at least a few times.<br>Try glancing at the screen briefly.</span>";
+      this.topDirective.innerHTML = "<span>Firstly, <strong style='color: var(--text-error)'>say it</strong> at least a few times.</span>";
       this.bottomDirectiveText.innerHTML = "It's best to repeat this step until you know the flow of the text.";
       this.btnBack.disabled = true;
       this.btnBack.style.opacity = "0.3";
       this.btnNext.style.display = "block";
       this.btnFinish.style.display = "none";
     } else if (this.currentStep === 2) {
-      this.topDirective.innerHTML = "<span>Secondly, <strong style='color: var(--text-error)'>say it without mistakes.</strong><br>Below is your progressively masked text.</span>";
+      this.topDirective.innerHTML = "<span>Secondly, <strong style='color: var(--text-error)'>say it without mistakes.</strong></span>";
       this.bottomDirectiveText.innerHTML = "Make sure you're comfortable with every line of the text.";
       this.btnBack.disabled = false;
       this.btnBack.style.opacity = "1";
       this.btnNext.style.display = "block";
       this.btnFinish.style.display = "none";
     } else {
-      this.topDirective.innerHTML = "<span>Thirdly, <strong style='color: var(--text-error)'>say it without pausing.</strong><br>Below is the heavily masked text.</span>";
+      this.topDirective.innerHTML = "<span>Thirdly, <strong style='color: var(--text-error)'>say it without pausing.</strong></span>";
       this.bottomDirectiveText.innerHTML = "If you're unsure about a word, go back two steps and reread that part.";
       this.btnBack.disabled = false;
       this.btnBack.style.opacity = "1";
@@ -197,76 +200,109 @@ var RevisionItemView = class extends import_obsidian.ItemView {
     if (this.confidence === "Moderate" && targetPct > 0) targetPct += 10;
     if (this.confidence === "Easy" && targetPct > 0) targetPct += 20;
     const ratio = targetPct / 100;
+    if (!this.isDomWrapped) {
+      const walker = document.createTreeWalker(this.mdContainer, NodeFilter.SHOW_TEXT, null);
+      const textNodes = [];
+      let n;
+      while (n = walker.nextNode()) textNodes.push(n);
+      for (const textNode of textNodes) {
+        if (!textNode.nodeValue?.trim()) continue;
+        const wrapper = document.createElement("span");
+        wrapper.className = "echo-text-wrapper";
+        wrapper.textContent = textNode.nodeValue;
+        this.originalTexts.set(wrapper, textNode.nodeValue);
+        textNode.parentNode?.replaceChild(wrapper, textNode);
+      }
+      this.isDomWrapped = true;
+    }
     let wordIndex = 0;
-    const walker = document.createTreeWalker(this.mdContainer, NodeFilter.SHOW_TEXT, null);
-    let node;
-    while (node = walker.nextNode()) {
-      let original = this.originalTexts.get(node);
-      if (original === void 0) {
-        original = node.nodeValue || "";
-        this.originalTexts.set(node, original);
-      }
+    const wrappers = this.mdContainer.querySelectorAll(".echo-text-wrapper");
+    wrappers.forEach((wrapper) => {
+      const original = this.originalTexts.get(wrapper);
+      if (original === void 0) return;
       if (targetPct === 0) {
-        node.nodeValue = original;
-        continue;
+        wrapper.textContent = original;
+        return;
       }
-      const el = node.parentElement;
+      const el = wrapper.parentElement;
       if (!el) {
-        node.nodeValue = original;
-        continue;
+        wrapper.textContent = original;
+        return;
       }
       const s = this.plugin.settings;
       if (s.skipCallouts && el.closest(".callout")) {
-        node.nodeValue = original;
-        continue;
+        wrapper.textContent = original;
+        return;
       }
       if (s.skipCheckboxes && el.closest(".task-list-item")) {
-        node.nodeValue = original;
-        continue;
+        wrapper.textContent = original;
+        return;
       }
       if (s.skipQuotes && el.closest("blockquote:not(.callout)")) {
-        node.nodeValue = original;
-        continue;
+        wrapper.textContent = original;
+        return;
       }
       if (s.excludeInternalLinks && el.closest(".internal-link")) {
-        node.nodeValue = original;
-        continue;
+        wrapper.textContent = original;
+        return;
       }
       if (s.excludeExternalLinks && el.closest(".external-link")) {
-        node.nodeValue = original;
-        continue;
+        wrapper.textContent = original;
+        return;
       }
       if (s.excludeEmbeds && el.closest(".internal-embed")) {
-        node.nodeValue = original;
-        continue;
+        wrapper.textContent = original;
+        return;
       }
       let processed = original;
       const placeholders = [];
+      const escapedMap = { "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" };
       if (s.customRegex) {
         try {
           const re = new RegExp(s.customRegex, "g");
           processed = processed.replace(re, (match) => {
-            placeholders.push(match);
-            return `@@ECHO_${placeholders.length - 1}@@`;
+            let escapedMatch = match.replace(/[&<>'"]/g, (tag) => escapedMap[tag] || tag);
+            placeholders.push(escapedMatch);
+            return `${placeholders.length - 1}`;
           });
         } catch (e) {
         }
       }
-      processed = processed.replace(/[\p{L}\p{N}]+/gu, (match) => {
+      processed = processed.replace(/[&<>'"]/g, (match) => {
+        placeholders.push(escapedMap[match] || match);
+        return `${placeholders.length - 1}`;
+      });
+      processed = processed.replace(/(\x01\d+\x02|[\p{L}\p{N}]+)/gu, (match) => {
+        if (match.startsWith("")) return match;
         wordIndex++;
         const seed = wordIndex;
         const x = Math.sin(seed) * 1e4;
         const rnd = x - Math.floor(x);
         if (rnd < ratio) {
-          return "_".repeat(match.length);
+          if (s.enableQuickLook) {
+            return `<span class="echo-blank" data-word="${match}">` + "_".repeat(match.length) + `</span>`;
+          } else {
+            return "_".repeat(match.length);
+          }
         }
         return match;
       });
-      for (let i = placeholders.length - 1; i >= 0; i--) {
-        processed = processed.replace(`@@ECHO_${i}@@`, placeholders[i]);
+      processed = processed.replace(/\x01(\d+)\x02/g, (_, idx) => {
+        return placeholders[parseInt(idx, 10)];
+      });
+      wrapper.innerHTML = processed;
+      if (s.enableQuickLook) {
+        const blanks = wrapper.querySelectorAll(".echo-blank");
+        blanks.forEach((b) => {
+          const htmlB = b;
+          htmlB.onclick = () => {
+            const word = htmlB.getAttribute("data-word");
+            if (word) htmlB.textContent = word;
+            htmlB.classList.add("revealed");
+          };
+        });
       }
-      node.nodeValue = processed;
-    }
+    });
   }
   async logAndNext() {
     const file = this.queue[this.currentIndex];
@@ -747,12 +783,61 @@ var EchoRecallPlugin = class extends import_obsidian.Plugin {
         .echo-tag-conf.mod { background: rgba(219, 153, 40, 0.1); color: #db9928; }
         .echo-tag-conf.easy { background: rgba(67, 181, 105, 0.1); color: #43b569; }
 
+        .echo-blank { cursor: pointer; transition: color 0.2s; }
+        .echo-blank:hover { color: var(--text-muted); }
+        .echo-blank.revealed { color: var(--text-error); cursor: default; }
+
         @media (max-width: 600px) {
-            .echo-dash-header { flex-direction: column; gap: 20px; align-items: flex-start; }
-            .echo-bottom-section { flex-direction: column; gap: 15px; }
-            .echo-bottom-directive-text { padding: 0; }
+            .echo-view-container { padding: 10px; position: relative; }
+            .echo-dash-header { flex-direction: column; gap: 15px; align-items: flex-start; }
             .echo-table-wrapper { font-size: 0.9em; }
-            .echo-markdown-content { padding: 15px; }
+            
+            .echo-session-header { margin-bottom: 8px; }
+            .echo-session-header h2 { font-size: 1.1em; }
+            .echo-top-directive { padding: 8px; min-height: auto; margin-bottom: 10px; font-size: 0.95em; }
+            
+            /* Give extra scroll room so the last line doesn't hide behind floating buttons */
+            .echo-markdown-content { padding: 15px; padding-bottom: 110px; font-size: 1em; }
+            
+            /* Floating Invisible Bottom Bar */
+            .echo-bottom-section {
+                position: absolute;
+                bottom: calc(75px + env(safe-area-inset-bottom, 20px));
+                left: 15px;
+                right: 15px;
+                flex-direction: row;
+                padding: 0;
+                margin: 0;
+                background: transparent !important;
+                border: none !important;
+                box-shadow: none !important;
+                pointer-events: none; /* Lets you click text in the empty space between buttons */
+                justify-content: space-between;
+                z-index: 100;
+            }
+            .echo-bottom-directive-text { display: none; }
+            .echo-controls-right { display: flex; }
+            
+            /* Modern Hovering Pill Styling */
+            .echo-btn-nav {
+                pointer-events: auto; /* Makes the buttons clickable again */
+                padding: 12px 24px;
+                font-size: 0.95em;
+                border-radius: 30px;
+                box-shadow: 0 4px 15px rgba(0,0,0,0.35) !important;
+                min-width: auto;
+                font-weight: 600;
+            }
+            /* Opaque backgrounds for the floating buttons */
+            .echo-btn-secondary.echo-btn-nav, .echo-btn-active.echo-btn-nav {
+                background: var(--background-primary) !important;
+                border: 1px solid var(--background-modifier-border) !important;
+                color: var(--text-normal) !important;
+            }
+            .echo-btn-primary.echo-btn-nav {
+                background: var(--interactive-accent) !important;
+                color: var(--text-on-accent) !important;
+            }
         }
         `;
     const style = document.createElement("style");
@@ -776,6 +861,10 @@ var EchoRecallSettingsTab = class extends import_obsidian.PluginSettingTab {
     containerEl.createEl("h2", { text: "Echo Recall Settings" });
     containerEl.createEl("p", { text: "Configure which elements should be bypassed by the text masking engine.", cls: "setting-item-description" });
     containerEl.createEl("br");
+    new import_obsidian.Setting(containerEl).setName("Enable Quick-Look and Cheating Mode").setDesc("Allows clicking on a blank to reveal the word (turns red to indicate a cheat)").addToggle((toggle) => toggle.setValue(this.plugin.settings.enableQuickLook).onChange(async (val) => {
+      this.plugin.settings.enableQuickLook = val;
+      await this.plugin.saveSettings();
+    }));
     new import_obsidian.Setting(containerEl).setName("Don't revise callouts").setDesc("Skips all text located inside Obsidian callouts").addToggle((toggle) => toggle.setValue(this.plugin.settings.skipCallouts).onChange(async (val) => {
       this.plugin.settings.skipCallouts = val;
       await this.plugin.saveSettings();
