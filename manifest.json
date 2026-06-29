@@ -3,7 +3,7 @@
   "name": "Echo Recall",
   "version": "1.0.1",
   "minAppVersion": "1.1.0",
-  "description": "Memorize your notes and paragraphs actively with spaced repetition and retrospective deadlines directly inside Obsidian.",
+  "description": "Memorize your notes and paragraphs actively with spaced repetition and retrospective deadlines.",
   "author": "sxjeel",
   "isDesktopOnly": false
 }
