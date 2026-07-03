@@ -1,7 +1,7 @@
 {
   "id": "echo-recall",
   "name": "Echo Recall",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "minAppVersion": "1.1.0",
   "description": "Memorize your notes and paragraphs actively with spaced repetition and retrospective deadlines.",
   "author": "sxjeel",
