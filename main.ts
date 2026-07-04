@@ -15,6 +15,9 @@ interface EchoRecallSettings {
     excludeEmbeds: boolean;
     customRegex: string;
     enableQuickLook: boolean;
+    // 'confidence' = original fixed 1/7/14-day intervals by the confidence dropdown.
+    // 'sm2' = performance-graded adaptive scheduling (SM-2) driven by an end-of-session grade.
+    schedulingMode: 'confidence' | 'sm2';
 }
 
 const DEFAULT_SETTINGS: EchoRecallSettings = {
@@ -25,7 +28,8 @@ const DEFAULT_SETTINGS: EchoRecallSettings = {
     excludeExternalLinks: true,
     excludeEmbeds: true,
     customRegex: '',
-    enableQuickLook: true
+    enableQuickLook: true,
+    schedulingMode: 'confidence'
 };
 
 interface EchoFrontmatter {
@@ -38,6 +42,10 @@ interface EchoFrontmatter {
     echo_deadline?: string;
     echo_history?: string[];
     echo_archived?: boolean;
+    // SM-2 scheduling state (only written when schedulingMode === 'sm2').
+    echo_ease?: number;      // ease factor, starts at 2.5, floored at 1.3
+    echo_interval?: number;  // last computed interval in days (uncapped by deadline)
+    echo_reps?: number;      // number of consecutive successful recalls
 }
 
 interface DashboardNoteData {
@@ -59,22 +67,61 @@ function getToday(): string {
     return window.moment().format('YYYY-MM-DD');
 }
 
+// Retrospective deadline prioritization: if an exam is sooner than the natural interval, shorten
+// the wait so the note is reviewed before test day. Shared by both scheduling modes.
+function deadlineCap(days: number, deadlineStr?: string): number {
+    if (!deadlineStr) return days;
+    const daysRemaining = window.moment(deadlineStr, 'YYYY-MM-DD').diff(window.moment(), 'days');
+    if (daysRemaining > 0 && daysRemaining < days) {
+        return Math.max(1, Math.floor(daysRemaining * 0.5));
+    }
+    return days;
+}
+
 function calculateNextDue(confidence: string, deadlineStr?: string): string {
-    let days = 1; 
+    let days = 1;
     if (confidence === 'Moderate') days = 7;
     if (confidence === 'Easy') days = 14;
 
-    if (deadlineStr && confidence !== 'Easy') {
-        const today = window.moment();
-        const deadlineDate = window.moment(deadlineStr, 'YYYY-MM-DD');
-        const daysRemaining = deadlineDate.diff(today, 'days');
-        
-        if (daysRemaining > 0 && daysRemaining < days) {
-            days = Math.max(1, Math.floor(daysRemaining * 0.5));
-        }
-    }
+    if (confidence !== 'Easy') days = deadlineCap(days, deadlineStr);
 
     return window.moment().add(days, 'days').format('YYYY-MM-DD');
+}
+
+// --- SM-2 adaptive scheduling ---------------------------------------------------------------
+// Grade buttons shown at the end of a session map to SM-2 quality scores (0-5, pass >= 3).
+type EchoGrade = 'Again' | 'Hard' | 'Good' | 'Easy';
+const SM2_QUALITY: Record<EchoGrade, number> = { Again: 1, Hard: 3, Good: 4, Easy: 5 };
+
+interface Sm2State { ease: number; interval: number; reps: number; }
+
+// Standard SM-2 update. `interval` returned is the natural (uncapped) interval in days; callers
+// apply deadlineCap() to the *due date* only, so the algorithm's own state is never corrupted.
+function sm2(state: Sm2State, quality: number): Sm2State {
+    let { ease, interval, reps } = state;
+    if (quality < 3) {
+        reps = 0;
+        interval = 1;
+    } else {
+        reps += 1;
+        interval = reps === 1 ? 1 : (reps === 2 ? 6 : Math.round(interval * ease));
+    }
+    ease = Math.max(1.3, ease + (0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02)));
+    ease = Math.round(ease * 100) / 100;
+    return { ease, interval, reps };
+}
+
+// Keep the dashboard's confidence colour meaningful in SM-2 mode by deriving it from ease.
+function confidenceFromEase(ease: number): 'Hard' | 'Moderate' | 'Easy' {
+    if (ease >= 2.6) return 'Easy';
+    if (ease >= 2.2) return 'Moderate';
+    return 'Hard';
+}
+
+function seedEaseFromConfidence(confidence?: string): number {
+    if (confidence === 'Hard') return 2.3;
+    if (confidence === 'Easy') return 2.7;
+    return 2.5;
 }
 
 async function updateNoteFrontmatter(app: App, file: TFile, updates: Partial<EchoFrontmatter>) {
@@ -88,6 +135,9 @@ async function updateNoteFrontmatter(app: App, file: TFile, updates: Partial<Ech
         if (updates.echo_deadline !== undefined) fm['echo_deadline'] = updates.echo_deadline;
         if (updates.echo_history !== undefined) fm['echo_history'] = updates.echo_history;
         if (updates.echo_archived !== undefined) fm['echo_archived'] = updates.echo_archived;
+        if (updates.echo_ease !== undefined) fm['echo_ease'] = updates.echo_ease;
+        if (updates.echo_interval !== undefined) fm['echo_interval'] = updates.echo_interval;
+        if (updates.echo_reps !== undefined) fm['echo_reps'] = updates.echo_reps;
     });
 }
 
@@ -118,6 +168,7 @@ class RevisionItemView extends ItemView {
     btnBack: HTMLButtonElement;
     btnNext: HTMLButtonElement;
     btnFinish: HTMLButtonElement;
+    gradeBar: HTMLElement;   // SM-2 mode: Again/Hard/Good/Easy grade buttons (shown on step 3)
 
     constructor(leaf: WorkspaceLeaf, public plugin: EchoRecallPlugin) {
         super(leaf);
@@ -176,6 +227,18 @@ class RevisionItemView extends ItemView {
 
         this.btnFinish = rightControls.createEl('button', { text: 'Finish & Log', cls: 'echo-btn echo-btn-primary echo-btn-nav' });
         this.btnFinish.onclick = async () => { await this.logAndNext(); };
+
+        // SM-2 mode: a row of grade buttons replaces "Finish & Log" on the final step.
+        this.gradeBar = rightControls.createDiv('echo-grade-bar');
+        const grades: EchoGrade[] = ['Again', 'Hard', 'Good', 'Easy'];
+        grades.forEach(g => {
+            const b = this.gradeBar.createEl('button', {
+                text: g,
+                cls: `echo-btn echo-btn-nav echo-grade echo-grade-${g.toLowerCase()}`
+            });
+            b.onclick = async () => { await this.logAndNext(SM2_QUALITY[g]); };
+        });
+        this.gradeBar.style.display = 'none';
     }
 
     async loadCurrentNote() {
@@ -201,6 +264,7 @@ class RevisionItemView extends ItemView {
     }
 
     updateStepUI() {
+        const sm2Mode = this.plugin.settings.schedulingMode === 'sm2';
         if (this.currentStep === 1) {
             this.topDirective.innerHTML = "<span>Firstly, <strong style='color: var(--text-error)'>say it</strong> at least a few times.</span>";
             this.bottomDirectiveText.innerHTML = "It's best to repeat this step until you know the flow of the text.";
@@ -208,6 +272,7 @@ class RevisionItemView extends ItemView {
             this.btnBack.style.opacity = '0.3';
             this.btnNext.style.display = 'block';
             this.btnFinish.style.display = 'none';
+            this.gradeBar.style.display = 'none';
         } else if (this.currentStep === 2) {
             this.topDirective.innerHTML = "<span>Secondly, <strong style='color: var(--text-error)'>say it without mistakes.</strong></span>";
             this.bottomDirectiveText.innerHTML = "Make sure you're comfortable with every line of the text.";
@@ -215,14 +280,23 @@ class RevisionItemView extends ItemView {
             this.btnBack.style.opacity = '1';
             this.btnNext.style.display = 'block';
             this.btnFinish.style.display = 'none';
+            this.gradeBar.style.display = 'none';
         } else {
             this.topDirective.innerHTML = "<span>Thirdly, <strong style='color: var(--text-error)'>say it without pausing.</strong></span>";
-            this.bottomDirectiveText.innerHTML = "If you're unsure about a word, go back two steps and reread that part.";
             this.btnBack.disabled = false;
             this.btnBack.style.opacity = '1';
             this.btnNext.style.display = 'none';
-            this.btnFinish.style.display = 'block';
-            this.btnFinish.textContent = (this.currentIndex < this.queue.length - 1) ? "Finish & Next Note" : "Finish & Log";
+            if (sm2Mode) {
+                // Grade honestly — the interval adapts to how well you recalled it.
+                this.bottomDirectiveText.innerHTML = "How did that go? Grade your recall to schedule the next review.";
+                this.btnFinish.style.display = 'none';
+                this.gradeBar.style.display = 'flex';
+            } else {
+                this.bottomDirectiveText.innerHTML = "If you're unsure about a word, go back two steps and reread that part.";
+                this.btnFinish.style.display = 'block';
+                this.gradeBar.style.display = 'none';
+                this.btnFinish.textContent = (this.currentIndex < this.queue.length - 1) ? "Finish & Next Note" : "Finish & Log";
+            }
         }
 
         const exactScroll = this.mdContainer.scrollTop;
@@ -346,23 +420,43 @@ class RevisionItemView extends ItemView {
         });
     }
 
-    async logAndNext() {
+    async logAndNext(quality?: number) {
         const file = this.queue[this.currentIndex];
         const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
-        
+
         const confidence = fm?.echo_confidence || 'Hard';
         const deadline = fm?.echo_deadline;
-        
+
         const history = Array.isArray(fm?.echo_history) ? fm.echo_history : [];
         history.push(getToday());
 
-        await updateNoteFrontmatter(this.app, file, {
+        const updates: Partial<EchoFrontmatter> = {
             echo_last_revised: getToday(),
             echo_revision_count: (fm?.echo_revision_count || 0) + 1,
-            echo_next_due: calculateNextDue(confidence, deadline),
             echo_date_added: fm?.echo_date_added || getToday(),
             echo_history: history
-        });
+        };
+
+        if (this.plugin.settings.schedulingMode === 'sm2' && quality !== undefined) {
+            // Seed SM-2 state from confidence on first graded review, then adapt to performance.
+            const prev: Sm2State = {
+                ease: typeof fm?.echo_ease === 'number' ? fm.echo_ease : seedEaseFromConfidence(confidence),
+                interval: typeof fm?.echo_interval === 'number' ? fm.echo_interval : 0,
+                reps: typeof fm?.echo_reps === 'number' ? fm.echo_reps : 0
+            };
+            const next = sm2(prev, quality);
+            // Cap only the due date to the deadline — the stored interval stays uncapped.
+            const cappedDays = deadlineCap(next.interval, deadline);
+            updates.echo_ease = next.ease;
+            updates.echo_interval = next.interval;
+            updates.echo_reps = next.reps;
+            updates.echo_next_due = window.moment().add(cappedDays, 'days').format('YYYY-MM-DD');
+            updates.echo_confidence = confidenceFromEase(next.ease);
+        } else {
+            updates.echo_next_due = calculateNextDue(confidence, deadline);
+        }
+
+        await updateNoteFrontmatter(this.app, file, updates);
 
         new Notice(`Logged revision for: ${file.basename}`);
 
@@ -884,6 +978,14 @@ export default class EchoRecallPlugin extends Plugin {
         .echo-blank:hover { color: var(--text-muted); }
         .echo-blank.revealed { color: var(--text-error); cursor: default; }
 
+        .echo-grade-bar { display: flex; gap: 8px; align-items: center; }
+        .echo-grade { min-width: 72px; border: 1px solid var(--background-modifier-border); }
+        .echo-grade-again { background: rgba(223, 76, 76, 0.12); color: #df4c4c; }
+        .echo-grade-hard { background: rgba(219, 153, 40, 0.12); color: #db9928; }
+        .echo-grade-good { background: rgba(67, 181, 105, 0.12); color: #43b569; }
+        .echo-grade-easy { background: var(--interactive-accent); color: var(--text-on-accent); border-color: transparent; }
+        .echo-grade:hover { filter: brightness(1.08); }
+
         @media (max-width: 600px) {
             .echo-view-container { padding: 10px; position: relative; }
             .echo-dash-header { flex-direction: column; gap: 15px; align-items: flex-start; }
@@ -963,6 +1065,20 @@ class EchoRecallSettingsTab extends PluginSettingTab {
         containerEl.createEl('h2', { text: 'Echo Recall Settings' });
         containerEl.createEl('p', { text: 'Configure which elements should be bypassed by the text masking engine.', cls: 'setting-item-description' });
         containerEl.createEl('br');
+
+        new Setting(containerEl)
+            .setName("Scheduling mode")
+            .setDesc("Confidence: original fixed 1/7/14-day intervals from the confidence dropdown. "
+                + "Adaptive (SM-2): grade your recall at the end of each session and let the interval "
+                + "adapt to how well you remembered. Deadlines still shorten the wait in both modes.")
+            .addDropdown(drop => drop
+                .addOption('confidence', 'Confidence (fixed intervals)')
+                .addOption('sm2', 'Adaptive (SM-2)')
+                .setValue(this.plugin.settings.schedulingMode)
+                .onChange(async (val) => {
+                    this.plugin.settings.schedulingMode = val as 'confidence' | 'sm2';
+                    await this.plugin.saveSettings();
+                }));
 
         new Setting(containerEl)
             .setName("Enable Quick-Look and Cheating Mode")

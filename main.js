@@ -33,24 +33,50 @@ var DEFAULT_SETTINGS = {
   excludeExternalLinks: true,
   excludeEmbeds: true,
   customRegex: "",
-  enableQuickLook: true
+  enableQuickLook: true,
+  schedulingMode: "confidence"
 };
 function getToday() {
   return window.moment().format("YYYY-MM-DD");
+}
+function deadlineCap(days, deadlineStr) {
+  if (!deadlineStr) return days;
+  const daysRemaining = window.moment(deadlineStr, "YYYY-MM-DD").diff(window.moment(), "days");
+  if (daysRemaining > 0 && daysRemaining < days) {
+    return Math.max(1, Math.floor(daysRemaining * 0.5));
+  }
+  return days;
 }
 function calculateNextDue(confidence, deadlineStr) {
   let days = 1;
   if (confidence === "Moderate") days = 7;
   if (confidence === "Easy") days = 14;
-  if (deadlineStr && confidence !== "Easy") {
-    const today = window.moment();
-    const deadlineDate = window.moment(deadlineStr, "YYYY-MM-DD");
-    const daysRemaining = deadlineDate.diff(today, "days");
-    if (daysRemaining > 0 && daysRemaining < days) {
-      days = Math.max(1, Math.floor(daysRemaining * 0.5));
-    }
-  }
+  if (confidence !== "Easy") days = deadlineCap(days, deadlineStr);
   return window.moment().add(days, "days").format("YYYY-MM-DD");
+}
+var SM2_QUALITY = { Again: 1, Hard: 3, Good: 4, Easy: 5 };
+function sm2(state, quality) {
+  let { ease, interval, reps } = state;
+  if (quality < 3) {
+    reps = 0;
+    interval = 1;
+  } else {
+    reps += 1;
+    interval = reps === 1 ? 1 : reps === 2 ? 6 : Math.round(interval * ease);
+  }
+  ease = Math.max(1.3, ease + (0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02)));
+  ease = Math.round(ease * 100) / 100;
+  return { ease, interval, reps };
+}
+function confidenceFromEase(ease) {
+  if (ease >= 2.6) return "Easy";
+  if (ease >= 2.2) return "Moderate";
+  return "Hard";
+}
+function seedEaseFromConfidence(confidence) {
+  if (confidence === "Hard") return 2.3;
+  if (confidence === "Easy") return 2.7;
+  return 2.5;
 }
 async function updateNoteFrontmatter(app, file, updates) {
   await app.fileManager.processFrontMatter(file, (fm) => {
@@ -63,6 +89,9 @@ async function updateNoteFrontmatter(app, file, updates) {
     if (updates.echo_deadline !== void 0) fm["echo_deadline"] = updates.echo_deadline;
     if (updates.echo_history !== void 0) fm["echo_history"] = updates.echo_history;
     if (updates.echo_archived !== void 0) fm["echo_archived"] = updates.echo_archived;
+    if (updates.echo_ease !== void 0) fm["echo_ease"] = updates.echo_ease;
+    if (updates.echo_interval !== void 0) fm["echo_interval"] = updates.echo_interval;
+    if (updates.echo_reps !== void 0) fm["echo_reps"] = updates.echo_reps;
   });
 }
 function extractFrontmatter(text) {
@@ -73,6 +102,7 @@ function extractFrontmatter(text) {
   return { frontmatter: "", body: text };
 }
 var RevisionItemView = class extends import_obsidian.ItemView {
+  // SM-2 mode: Again/Hard/Good/Easy grade buttons (shown on step 3)
   constructor(leaf, plugin) {
     super(leaf);
     this.plugin = plugin;
@@ -94,6 +124,7 @@ var RevisionItemView = class extends import_obsidian.ItemView {
   btnBack;
   btnNext;
   btnFinish;
+  gradeBar;
   getViewType() {
     return ECHO_REVISION_VIEW_TYPE;
   }
@@ -147,6 +178,18 @@ var RevisionItemView = class extends import_obsidian.ItemView {
     this.btnFinish.onclick = async () => {
       await this.logAndNext();
     };
+    this.gradeBar = rightControls.createDiv("echo-grade-bar");
+    const grades = ["Again", "Hard", "Good", "Easy"];
+    grades.forEach((g) => {
+      const b = this.gradeBar.createEl("button", {
+        text: g,
+        cls: `echo-btn echo-btn-nav echo-grade echo-grade-${g.toLowerCase()}`
+      });
+      b.onclick = async () => {
+        await this.logAndNext(SM2_QUALITY[g]);
+      };
+    });
+    this.gradeBar.style.display = "none";
   }
   async loadCurrentNote() {
     this.currentStep = 1;
@@ -165,6 +208,7 @@ var RevisionItemView = class extends import_obsidian.ItemView {
     this.updateStepUI();
   }
   updateStepUI() {
+    const sm2Mode = this.plugin.settings.schedulingMode === "sm2";
     if (this.currentStep === 1) {
       this.topDirective.innerHTML = "<span>Firstly, <strong style='color: var(--text-error)'>say it</strong> at least a few times.</span>";
       this.bottomDirectiveText.innerHTML = "It's best to repeat this step until you know the flow of the text.";
@@ -172,6 +216,7 @@ var RevisionItemView = class extends import_obsidian.ItemView {
       this.btnBack.style.opacity = "0.3";
       this.btnNext.style.display = "block";
       this.btnFinish.style.display = "none";
+      this.gradeBar.style.display = "none";
     } else if (this.currentStep === 2) {
       this.topDirective.innerHTML = "<span>Secondly, <strong style='color: var(--text-error)'>say it without mistakes.</strong></span>";
       this.bottomDirectiveText.innerHTML = "Make sure you're comfortable with every line of the text.";
@@ -179,14 +224,22 @@ var RevisionItemView = class extends import_obsidian.ItemView {
       this.btnBack.style.opacity = "1";
       this.btnNext.style.display = "block";
       this.btnFinish.style.display = "none";
+      this.gradeBar.style.display = "none";
     } else {
       this.topDirective.innerHTML = "<span>Thirdly, <strong style='color: var(--text-error)'>say it without pausing.</strong></span>";
-      this.bottomDirectiveText.innerHTML = "If you're unsure about a word, go back two steps and reread that part.";
       this.btnBack.disabled = false;
       this.btnBack.style.opacity = "1";
       this.btnNext.style.display = "none";
-      this.btnFinish.style.display = "block";
-      this.btnFinish.textContent = this.currentIndex < this.queue.length - 1 ? "Finish & Next Note" : "Finish & Log";
+      if (sm2Mode) {
+        this.bottomDirectiveText.innerHTML = "How did that go? Grade your recall to schedule the next review.";
+        this.btnFinish.style.display = "none";
+        this.gradeBar.style.display = "flex";
+      } else {
+        this.bottomDirectiveText.innerHTML = "If you're unsure about a word, go back two steps and reread that part.";
+        this.btnFinish.style.display = "block";
+        this.gradeBar.style.display = "none";
+        this.btnFinish.textContent = this.currentIndex < this.queue.length - 1 ? "Finish & Next Note" : "Finish & Log";
+      }
     }
     const exactScroll = this.mdContainer.scrollTop;
     this.applyMaskToDOM();
@@ -304,20 +357,36 @@ var RevisionItemView = class extends import_obsidian.ItemView {
       }
     });
   }
-  async logAndNext() {
+  async logAndNext(quality) {
     const file = this.queue[this.currentIndex];
     const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
     const confidence = fm?.echo_confidence || "Hard";
     const deadline = fm?.echo_deadline;
     const history = Array.isArray(fm?.echo_history) ? fm.echo_history : [];
     history.push(getToday());
-    await updateNoteFrontmatter(this.app, file, {
+    const updates = {
       echo_last_revised: getToday(),
       echo_revision_count: (fm?.echo_revision_count || 0) + 1,
-      echo_next_due: calculateNextDue(confidence, deadline),
       echo_date_added: fm?.echo_date_added || getToday(),
       echo_history: history
-    });
+    };
+    if (this.plugin.settings.schedulingMode === "sm2" && quality !== void 0) {
+      const prev = {
+        ease: typeof fm?.echo_ease === "number" ? fm.echo_ease : seedEaseFromConfidence(confidence),
+        interval: typeof fm?.echo_interval === "number" ? fm.echo_interval : 0,
+        reps: typeof fm?.echo_reps === "number" ? fm.echo_reps : 0
+      };
+      const next = sm2(prev, quality);
+      const cappedDays = deadlineCap(next.interval, deadline);
+      updates.echo_ease = next.ease;
+      updates.echo_interval = next.interval;
+      updates.echo_reps = next.reps;
+      updates.echo_next_due = window.moment().add(cappedDays, "days").format("YYYY-MM-DD");
+      updates.echo_confidence = confidenceFromEase(next.ease);
+    } else {
+      updates.echo_next_due = calculateNextDue(confidence, deadline);
+    }
+    await updateNoteFrontmatter(this.app, file, updates);
     new import_obsidian.Notice(`Logged revision for: ${file.basename}`);
     this.currentIndex++;
     if (this.currentIndex < this.queue.length) {
@@ -787,6 +856,14 @@ var EchoRecallPlugin = class extends import_obsidian.Plugin {
         .echo-blank:hover { color: var(--text-muted); }
         .echo-blank.revealed { color: var(--text-error); cursor: default; }
 
+        .echo-grade-bar { display: flex; gap: 8px; align-items: center; }
+        .echo-grade { min-width: 72px; border: 1px solid var(--background-modifier-border); }
+        .echo-grade-again { background: rgba(223, 76, 76, 0.12); color: #df4c4c; }
+        .echo-grade-hard { background: rgba(219, 153, 40, 0.12); color: #db9928; }
+        .echo-grade-good { background: rgba(67, 181, 105, 0.12); color: #43b569; }
+        .echo-grade-easy { background: var(--interactive-accent); color: var(--text-on-accent); border-color: transparent; }
+        .echo-grade:hover { filter: brightness(1.08); }
+
         @media (max-width: 600px) {
             .echo-view-container { padding: 10px; position: relative; }
             .echo-dash-header { flex-direction: column; gap: 15px; align-items: flex-start; }
@@ -861,6 +938,10 @@ var EchoRecallSettingsTab = class extends import_obsidian.PluginSettingTab {
     containerEl.createEl("h2", { text: "Echo Recall Settings" });
     containerEl.createEl("p", { text: "Configure which elements should be bypassed by the text masking engine.", cls: "setting-item-description" });
     containerEl.createEl("br");
+    new import_obsidian.Setting(containerEl).setName("Scheduling mode").setDesc("Confidence: original fixed 1/7/14-day intervals from the confidence dropdown. Adaptive (SM-2): grade your recall at the end of each session and let the interval adapt to how well you remembered. Deadlines still shorten the wait in both modes.").addDropdown((drop) => drop.addOption("confidence", "Confidence (fixed intervals)").addOption("sm2", "Adaptive (SM-2)").setValue(this.plugin.settings.schedulingMode).onChange(async (val) => {
+      this.plugin.settings.schedulingMode = val;
+      await this.plugin.saveSettings();
+    }));
     new import_obsidian.Setting(containerEl).setName("Enable Quick-Look and Cheating Mode").setDesc("Allows clicking on a blank to reveal the word (turns red to indicate a cheat)").addToggle((toggle) => toggle.setValue(this.plugin.settings.enableQuickLook).onChange(async (val) => {
       this.plugin.settings.enableQuickLook = val;
       await this.plugin.saveSettings();
