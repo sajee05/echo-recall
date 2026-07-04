@@ -33,7 +33,8 @@ var DEFAULT_SETTINGS = {
   excludeExternalLinks: true,
   excludeEmbeds: true,
   customRegex: "",
-  enableQuickLook: true
+  enableQuickLook: true,
+  chunkMode: "off"
 };
 function getToday() {
   return window.moment().format("YYYY-MM-DD");
@@ -72,6 +73,18 @@ function extractFrontmatter(text) {
   }
   return { frontmatter: "", body: text };
 }
+function splitChunks(body, mode) {
+  const text = body.trim();
+  if (!text) return [body];
+  let parts;
+  if (mode === "paragraph") {
+    parts = text.split(/\n\s*\n+/);
+  } else {
+    parts = text.split(/(?<=[.!?]["'”’)\]]?)\s+(?=["'“‘([]?[A-Z0-9])/);
+  }
+  const chunks = parts.map((s) => s.trim()).filter(Boolean);
+  return chunks.length ? chunks : [body];
+}
 var RevisionItemView = class extends import_obsidian.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
@@ -85,6 +98,9 @@ var RevisionItemView = class extends import_obsidian.ItemView {
   confidence = "Hard";
   originalTexts = /* @__PURE__ */ new WeakMap();
   isDomWrapped = false;
+  chunks = [];
+  // review pieces of the current note (one entry = whole note when off)
+  currentChunk = 0;
   headerTitle;
   headerCount;
   topDirective;
@@ -145,24 +161,42 @@ var RevisionItemView = class extends import_obsidian.ItemView {
     };
     this.btnFinish = rightControls.createEl("button", { text: "Finish & Log", cls: "echo-btn echo-btn-primary echo-btn-nav" });
     this.btnFinish.onclick = async () => {
-      await this.logAndNext();
+      await this.advanceOrFinish();
     };
   }
   async loadCurrentNote() {
+    const file = this.queue[this.currentIndex];
+    const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
+    this.confidence = fm?.echo_confidence || "Hard";
+    this.headerTitle.textContent = `Revising: ${file.basename}`;
+    const rawText = await this.app.vault.read(file);
+    const { body } = extractFrontmatter(rawText);
+    const mode = this.plugin.settings.chunkMode;
+    this.chunks = mode === "off" ? [body] : splitChunks(body, mode);
+    this.currentChunk = 0;
+    await this.renderCurrentChunk();
+  }
+  // Render the active chunk (whole note when chunking is off) and reset per-chunk masking state.
+  async renderCurrentChunk() {
     this.currentStep = 1;
     this.scrollPos = 0;
     this.originalTexts = /* @__PURE__ */ new WeakMap();
     this.isDomWrapped = false;
     const file = this.queue[this.currentIndex];
-    const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
-    this.confidence = fm?.echo_confidence || "Hard";
-    this.headerTitle.textContent = `Revising: ${file.basename}`;
-    this.headerCount.textContent = `Note ${this.currentIndex + 1} of ${this.queue.length}`;
-    const rawText = await this.app.vault.read(file);
-    const { body } = extractFrontmatter(rawText);
+    const total = this.chunks.length;
+    this.headerCount.textContent = total > 1 ? `Note ${this.currentIndex + 1}/${this.queue.length} \xB7 chunk ${this.currentChunk + 1}/${total}` : `Note ${this.currentIndex + 1} of ${this.queue.length}`;
     this.mdContainer.empty();
-    await import_obsidian.MarkdownRenderer.render(this.app, body, this.mdContainer, file.path, this);
+    await import_obsidian.MarkdownRenderer.render(this.app, this.chunks[this.currentChunk], this.mdContainer, file.path, this);
     this.updateStepUI();
+  }
+  // Called from the final step: advance to the next chunk, or log the note and move on.
+  async advanceOrFinish() {
+    if (this.currentChunk < this.chunks.length - 1) {
+      this.currentChunk++;
+      await this.renderCurrentChunk();
+    } else {
+      await this.logAndNext();
+    }
   }
   updateStepUI() {
     if (this.currentStep === 1) {
@@ -186,7 +220,11 @@ var RevisionItemView = class extends import_obsidian.ItemView {
       this.btnBack.style.opacity = "1";
       this.btnNext.style.display = "none";
       this.btnFinish.style.display = "block";
-      this.btnFinish.textContent = this.currentIndex < this.queue.length - 1 ? "Finish & Next Note" : "Finish & Log";
+      if (this.currentChunk < this.chunks.length - 1) {
+        this.btnFinish.textContent = "Next chunk";
+      } else {
+        this.btnFinish.textContent = this.currentIndex < this.queue.length - 1 ? "Finish & Next Note" : "Finish & Log";
+      }
     }
     const exactScroll = this.mdContainer.scrollTop;
     this.applyMaskToDOM();
@@ -861,6 +899,10 @@ var EchoRecallSettingsTab = class extends import_obsidian.PluginSettingTab {
     containerEl.createEl("h2", { text: "Echo Recall Settings" });
     containerEl.createEl("p", { text: "Configure which elements should be bypassed by the text masking engine.", cls: "setting-item-description" });
     containerEl.createEl("br");
+    new import_obsidian.Setting(containerEl).setName("Chunking").setDesc("Break a long note into smaller pieces and drill one at a time, then move on. Paragraph: split on blank lines. Sentence: split on sentence endings (verse-number aware). Off: review the whole note at once.").addDropdown((drop) => drop.addOption("off", "Off (whole note)").addOption("paragraph", "By paragraph").addOption("sentence", "By sentence").setValue(this.plugin.settings.chunkMode).onChange(async (val) => {
+      this.plugin.settings.chunkMode = val;
+      await this.plugin.saveSettings();
+    }));
     new import_obsidian.Setting(containerEl).setName("Enable Quick-Look and Cheating Mode").setDesc("Allows clicking on a blank to reveal the word (turns red to indicate a cheat)").addToggle((toggle) => toggle.setValue(this.plugin.settings.enableQuickLook).onChange(async (val) => {
       this.plugin.settings.enableQuickLook = val;
       await this.plugin.saveSettings();

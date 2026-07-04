@@ -15,6 +15,9 @@ interface EchoRecallSettings {
     excludeEmbeds: boolean;
     customRegex: string;
     enableQuickLook: boolean;
+    // Break a long note into smaller pieces and drill one at a time (chunking).
+    // 'off' = review the whole note at once (original behavior).
+    chunkMode: 'off' | 'paragraph' | 'sentence';
 }
 
 const DEFAULT_SETTINGS: EchoRecallSettings = {
@@ -25,7 +28,8 @@ const DEFAULT_SETTINGS: EchoRecallSettings = {
     excludeExternalLinks: true,
     excludeEmbeds: true,
     customRegex: '',
-    enableQuickLook: true
+    enableQuickLook: true,
+    chunkMode: 'off'
 };
 
 interface EchoFrontmatter {
@@ -99,6 +103,25 @@ function extractFrontmatter(text: string): { frontmatter: string, body: string }
     return { frontmatter: '', body: text };
 }
 
+// --- Chunking -------------------------------------------------------------------------------
+// Split a note body into review chunks. 'paragraph' splits on blank lines (keeps markdown blocks
+// intact); 'sentence' splits on sentence enders while respecting leading verse numbers. Always
+// returns at least one chunk so callers can treat the result uniformly.
+function splitChunks(body: string, mode: 'paragraph' | 'sentence'): string[] {
+    const text = body.trim();
+    if (!text) return [body];
+    let parts: string[];
+    if (mode === 'paragraph') {
+        parts = text.split(/\n\s*\n+/);
+    } else {
+        // Sentence end (. ! ?), optional closing quote/bracket, then whitespace before the next
+        // sentence (which starts with an uppercase letter, digit/verse number, or opening quote).
+        parts = text.split(/(?<=[.!?]["'”’)\]]?)\s+(?=["'“‘([]?[A-Z0-9])/);
+    }
+    const chunks = parts.map(s => s.trim()).filter(Boolean);
+    return chunks.length ? chunks : [body];
+}
+
 class RevisionItemView extends ItemView {
     queue: TFile[] = [];
     currentIndex: number = 0;
@@ -108,6 +131,9 @@ class RevisionItemView extends ItemView {
     confidence: string = 'Hard';
     originalTexts: WeakMap<HTMLElement | Text, string> = new WeakMap();
     isDomWrapped: boolean = false;
+
+    chunks: string[] = [];       // review pieces of the current note (one entry = whole note when off)
+    currentChunk: number = 0;
 
     headerTitle: HTMLElement;
     headerCount: HTMLElement;
@@ -175,29 +201,53 @@ class RevisionItemView extends ItemView {
         };
 
         this.btnFinish = rightControls.createEl('button', { text: 'Finish & Log', cls: 'echo-btn echo-btn-primary echo-btn-nav' });
-        this.btnFinish.onclick = async () => { await this.logAndNext(); };
+        this.btnFinish.onclick = async () => { await this.advanceOrFinish(); };
     }
 
     async loadCurrentNote() {
+        const file = this.queue[this.currentIndex];
+        const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
+        this.confidence = fm?.echo_confidence || 'Hard';
+
+        this.headerTitle.textContent = `Revising: ${file.basename}`;
+
+        const rawText = await this.app.vault.read(file);
+        const { body } = extractFrontmatter(rawText);
+
+        const mode = this.plugin.settings.chunkMode;
+        this.chunks = mode === 'off' ? [body] : splitChunks(body, mode);
+        this.currentChunk = 0;
+
+        await this.renderCurrentChunk();
+    }
+
+    // Render the active chunk (whole note when chunking is off) and reset per-chunk masking state.
+    async renderCurrentChunk() {
         this.currentStep = 1;
         this.scrollPos = 0;
         this.originalTexts = new WeakMap();
         this.isDomWrapped = false;
 
         const file = this.queue[this.currentIndex];
-        const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
-        this.confidence = fm?.echo_confidence || 'Hard';
-
-        this.headerTitle.textContent = `Revising: ${file.basename}`;
-        this.headerCount.textContent = `Note ${this.currentIndex + 1} of ${this.queue.length}`;
-
-        const rawText = await this.app.vault.read(file);
-        const { body } = extractFrontmatter(rawText);
+        const total = this.chunks.length;
+        this.headerCount.textContent = total > 1
+            ? `Note ${this.currentIndex + 1}/${this.queue.length} · chunk ${this.currentChunk + 1}/${total}`
+            : `Note ${this.currentIndex + 1} of ${this.queue.length}`;
 
         this.mdContainer.empty();
-        await MarkdownRenderer.render(this.app, body, this.mdContainer, file.path, this);
+        await MarkdownRenderer.render(this.app, this.chunks[this.currentChunk], this.mdContainer, file.path, this);
 
         this.updateStepUI();
+    }
+
+    // Called from the final step: advance to the next chunk, or log the note and move on.
+    async advanceOrFinish() {
+        if (this.currentChunk < this.chunks.length - 1) {
+            this.currentChunk++;
+            await this.renderCurrentChunk();
+        } else {
+            await this.logAndNext();
+        }
     }
 
     updateStepUI() {
@@ -222,7 +272,11 @@ class RevisionItemView extends ItemView {
             this.btnBack.style.opacity = '1';
             this.btnNext.style.display = 'none';
             this.btnFinish.style.display = 'block';
-            this.btnFinish.textContent = (this.currentIndex < this.queue.length - 1) ? "Finish & Next Note" : "Finish & Log";
+            if (this.currentChunk < this.chunks.length - 1) {
+                this.btnFinish.textContent = "Next chunk";
+            } else {
+                this.btnFinish.textContent = (this.currentIndex < this.queue.length - 1) ? "Finish & Next Note" : "Finish & Log";
+            }
         }
 
         const exactScroll = this.mdContainer.scrollTop;
@@ -963,6 +1017,21 @@ class EchoRecallSettingsTab extends PluginSettingTab {
         containerEl.createEl('h2', { text: 'Echo Recall Settings' });
         containerEl.createEl('p', { text: 'Configure which elements should be bypassed by the text masking engine.', cls: 'setting-item-description' });
         containerEl.createEl('br');
+
+        new Setting(containerEl)
+            .setName("Chunking")
+            .setDesc("Break a long note into smaller pieces and drill one at a time, then move on. "
+                + "Paragraph: split on blank lines. Sentence: split on sentence endings (verse-number "
+                + "aware). Off: review the whole note at once.")
+            .addDropdown(drop => drop
+                .addOption('off', 'Off (whole note)')
+                .addOption('paragraph', 'By paragraph')
+                .addOption('sentence', 'By sentence')
+                .setValue(this.plugin.settings.chunkMode)
+                .onChange(async (val) => {
+                    this.plugin.settings.chunkMode = val as 'off' | 'paragraph' | 'sentence';
+                    await this.plugin.saveSettings();
+                }));
 
         new Setting(containerEl)
             .setName("Enable Quick-Look and Cheating Mode")
