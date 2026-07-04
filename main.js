@@ -33,8 +33,30 @@ var DEFAULT_SETTINGS = {
   excludeExternalLinks: true,
   excludeEmbeds: true,
   customRegex: "",
-  enableQuickLook: true
+  enableQuickLook: true,
+  interleaveDueQueue: false
 };
+var LEECH_REVISIONS = 8;
+function interleaveByTag(data) {
+  const groups = /* @__PURE__ */ new Map();
+  for (const d of data) {
+    const key = d.tags.length ? d.tags[0] : "__untagged__";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(d.file);
+  }
+  const lists = Array.from(groups.values());
+  const out = [];
+  for (let i = 0, added = true; added; i++) {
+    added = false;
+    for (const list of lists) {
+      if (i < list.length) {
+        out.push(list[i]);
+        added = true;
+      }
+    }
+  }
+  return out;
+}
 function getToday() {
   return window.moment().format("YYYY-MM-DD");
 }
@@ -363,19 +385,22 @@ var DashboardItemView = class extends import_obsidian.ItemView {
         if (file instanceof import_obsidian.TFile) {
           const fm = cache.frontmatter;
           const archived = fm.echo_archived === true;
+          const revisions = fm.echo_revision_count || 0;
+          const confidence = fm.echo_confidence || "Hard";
           data.push({
             file,
             dateAdded: fm.echo_date_added,
             title: file.basename,
             tags: Array.isArray(fm.echo_tags) ? fm.echo_tags : [],
-            revisions: fm.echo_revision_count || 0,
+            revisions,
             lastRevised: fm.echo_last_revised || "Never",
-            confidence: fm.echo_confidence || "Hard",
+            confidence,
             nextDue: fm.echo_next_due || getToday(),
             deadline: fm.echo_deadline || "",
             history: Array.isArray(fm.echo_history) ? fm.echo_history : [],
             archived,
-            isDue: !archived && (fm.echo_next_due || getToday()) <= today
+            isDue: !archived && (fm.echo_next_due || getToday()) <= today,
+            isLeech: !archived && revisions >= LEECH_REVISIONS && confidence === "Hard"
           });
         }
       }
@@ -397,8 +422,10 @@ var DashboardItemView = class extends import_obsidian.ItemView {
     masterPlay.createSpan({ text: " Start Due Notes" });
     masterPlay.onclick = () => {
       if (dueData.length === 0) return new import_obsidian.Notice("No notes due today!");
-      this.plugin.startRevisionSession(dueData.map((d) => d.file));
+      const files = this.plugin.settings.interleaveDueQueue ? interleaveByTag(dueData) : dueData.map((d) => d.file);
+      this.plugin.startRevisionSession(files);
     };
+    this.renderHeatmap(container, fullData);
     let displayData = fullData;
     if (this.viewMode === "all" || this.viewMode === "tags") {
       displayData = fullData.filter((d) => !d.archived);
@@ -543,6 +570,41 @@ var DashboardItemView = class extends import_obsidian.ItemView {
             brewed by <a href="https://www.youtube.com/@sxjeel" target="_blank">sxjeel</a> \u2615
         `;
   }
+  // GitHub-style calendar of revision activity, aggregated from every note's echo_history.
+  renderHeatmap(container, data) {
+    const counts = /* @__PURE__ */ new Map();
+    for (const d of data) {
+      for (const day of d.history) counts.set(day, (counts.get(day) || 0) + 1);
+    }
+    if (counts.size === 0) return;
+    let max = 1;
+    counts.forEach((v) => {
+      if (v > max) max = v;
+    });
+    const weeks = 26;
+    const wrap = container.createDiv("echo-heatmap");
+    const head = wrap.createDiv("echo-heatmap-head");
+    head.createSpan({ text: "Revision activity", cls: "echo-heatmap-title" });
+    const total = Array.from(counts.values()).reduce((a, b) => a + b, 0);
+    head.createSpan({ text: `${total} revisions \xB7 last ${weeks} weeks`, cls: "echo-heatmap-sub" });
+    const grid = wrap.createDiv("echo-heatmap-grid");
+    const startWeek = window.moment().startOf("week").subtract(weeks - 1, "weeks");
+    const today = window.moment();
+    for (let w = 0; w < weeks; w++) {
+      const col = grid.createDiv("echo-heatmap-col");
+      for (let dow = 0; dow < 7; dow++) {
+        const day = startWeek.clone().add(w, "weeks").add(dow, "days");
+        const key = day.format("YYYY-MM-DD");
+        const c = counts.get(key) || 0;
+        const level = c === 0 ? 0 : Math.min(4, Math.max(1, Math.ceil(c / max * 4)));
+        const cell = col.createDiv(`echo-heatmap-cell echo-hm-${level}`);
+        if (day.isAfter(today, "day")) cell.addClass("echo-hm-future");
+        const label = `${key}: ${c} revision${c === 1 ? "" : "s"}`;
+        cell.setAttr("aria-label", label);
+        cell.setAttr("title", label);
+      }
+    }
+  }
   renderRow(tbody, data) {
     const tr = tbody.createEl("tr");
     if (data.archived) tr.style.opacity = "0.7";
@@ -550,6 +612,11 @@ var DashboardItemView = class extends import_obsidian.ItemView {
     const tdTitle = tr.createEl("td");
     const titleLink = tdTitle.createEl("a", { text: data.title, cls: "echo-title-link" });
     titleLink.onclick = () => this.app.workspace.getLeaf("tab").openFile(data.file);
+    if (data.isLeech) {
+      const leech = tdTitle.createSpan({ text: "\u{1FA78} leech", cls: "echo-leech-pill" });
+      leech.setAttr("aria-label", `Reviewed ${data.revisions}\xD7 but still Hard \u2014 try re-chunking or elaborating.`);
+      leech.setAttr("title", `Reviewed ${data.revisions}\xD7 but still Hard \u2014 try re-chunking or elaborating.`);
+    }
     const tdTags = tr.createEl("td");
     const tagsWrapper = tdTags.createDiv("echo-inline-tags");
     data.tags.forEach((tag) => {
@@ -787,6 +854,22 @@ var EchoRecallPlugin = class extends import_obsidian.Plugin {
         .echo-blank:hover { color: var(--text-muted); }
         .echo-blank.revealed { color: var(--text-error); cursor: default; }
 
+        .echo-leech-pill { margin-left: 8px; font-size: 0.75em; font-weight: 600; color: #df4c4c; background: rgba(223, 76, 76, 0.12); border-radius: 10px; padding: 1px 7px; white-space: nowrap; cursor: help; }
+
+        .echo-heatmap { margin-bottom: 25px; padding: 16px 20px; background: var(--background-secondary); border-radius: 16px; border: 1px solid var(--background-modifier-border); }
+        .echo-heatmap-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px; flex-wrap: wrap; gap: 6px; }
+        .echo-heatmap-title { font-size: 0.9em; text-transform: uppercase; letter-spacing: 1px; color: var(--text-muted); }
+        .echo-heatmap-sub { font-size: 0.8em; color: var(--text-faint); }
+        .echo-heatmap-grid { display: flex; gap: 3px; overflow-x: auto; }
+        .echo-heatmap-col { display: flex; flex-direction: column; gap: 3px; }
+        .echo-heatmap-cell { width: 12px; height: 12px; border-radius: 3px; background: var(--background-modifier-border); }
+        .echo-hm-0 { background: var(--background-modifier-border); }
+        .echo-hm-1 { background: rgba(67, 181, 105, 0.35); }
+        .echo-hm-2 { background: rgba(67, 181, 105, 0.55); }
+        .echo-hm-3 { background: rgba(67, 181, 105, 0.75); }
+        .echo-hm-4 { background: rgba(67, 181, 105, 1); }
+        .echo-hm-future { opacity: 0.25; }
+
         @media (max-width: 600px) {
             .echo-view-container { padding: 10px; position: relative; }
             .echo-dash-header { flex-direction: column; gap: 15px; align-items: flex-start; }
@@ -861,6 +944,10 @@ var EchoRecallSettingsTab = class extends import_obsidian.PluginSettingTab {
     containerEl.createEl("h2", { text: "Echo Recall Settings" });
     containerEl.createEl("p", { text: "Configure which elements should be bypassed by the text masking engine.", cls: "setting-item-description" });
     containerEl.createEl("br");
+    new import_obsidian.Setting(containerEl).setName("Interleave due notes").setDesc("When starting your due notes, mix them across their echo tags so consecutive notes cover different topics (interleaving improves retention over blocked practice).").addToggle((toggle) => toggle.setValue(this.plugin.settings.interleaveDueQueue).onChange(async (val) => {
+      this.plugin.settings.interleaveDueQueue = val;
+      await this.plugin.saveSettings();
+    }));
     new import_obsidian.Setting(containerEl).setName("Enable Quick-Look and Cheating Mode").setDesc("Allows clicking on a blank to reveal the word (turns red to indicate a cheat)").addToggle((toggle) => toggle.setValue(this.plugin.settings.enableQuickLook).onChange(async (val) => {
       this.plugin.settings.enableQuickLook = val;
       await this.plugin.saveSettings();
