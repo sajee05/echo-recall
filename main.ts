@@ -15,6 +15,12 @@ interface EchoRecallSettings {
     excludeEmbeds: boolean;
     customRegex: string;
     enableQuickLook: boolean;
+    // How masked words are shown. 'blank' = original full underscores. 'first-letter' = keep the
+    // first letter as a cue (w____). 'graduated' = withdraw the cue as you go (first-letter on the
+    // lightly-masked step, full blanks on the heavily-masked step).
+    cueMode: 'blank' | 'first-letter' | 'graduated';
+    // Optional "type it from memory" panel that scores what you type against the note.
+    enableTypedRecall: boolean;
 }
 
 const DEFAULT_SETTINGS: EchoRecallSettings = {
@@ -25,7 +31,9 @@ const DEFAULT_SETTINGS: EchoRecallSettings = {
     excludeExternalLinks: true,
     excludeEmbeds: true,
     customRegex: '',
-    enableQuickLook: true
+    enableQuickLook: true,
+    cueMode: 'blank',
+    enableTypedRecall: false
 };
 
 interface EchoFrontmatter {
@@ -99,6 +107,60 @@ function extractFrontmatter(text: string): { frontmatter: string, body: string }
     return { frontmatter: '', body: text };
 }
 
+// --- Graduated cueing -----------------------------------------------------------------------
+type CueKind = 'blank' | 'first-letter';
+
+// Which cue to show for a masked word on a given step. In 'graduated' mode the cue is withdrawn
+// as masking intensifies: keep the first letter on the lighter step, full blanks on the heaviest.
+function cueForStep(mode: 'blank' | 'first-letter' | 'graduated', step: number): CueKind {
+    if (mode === 'first-letter') return 'first-letter';
+    if (mode === 'graduated') return step >= 3 ? 'blank' : 'first-letter';
+    return 'blank';
+}
+
+// Render a masked word: full underscores, or first-letter + underscores when cueing.
+function maskWord(word: string, cue: CueKind): string {
+    if (cue === 'first-letter' && word.length > 1) {
+        return word[0] + '_'.repeat(word.length - 1);
+    }
+    return '_'.repeat(word.length);
+}
+
+// --- Typed-recall scoring -------------------------------------------------------------------
+function normalizeWords(text: string): string[] {
+    return text.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').split(/\s+/).filter(Boolean);
+}
+
+// Compare typed text against the reference by longest-common-subsequence of normalized words, so
+// omissions/insertions are handled gracefully. Returns which reference words were recalled.
+function scoreRecall(reference: string, typed: string):
+    { correct: number; total: number; refWords: string[]; matchedRef: boolean[] } {
+    const refWords = normalizeWords(reference);
+    const typedWords = normalizeWords(typed);
+    const n = refWords.length;
+    const m = typedWords.length;
+    const matchedRef = new Array(n).fill(false);
+    // Guard against pathological sizes (notes are small, but be safe with the O(n*m) DP).
+    if (n === 0 || m === 0 || n * m > 4_000_000) {
+        return { correct: 0, total: n, refWords, matchedRef };
+    }
+    const dp: number[][] = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+    for (let i = 1; i <= n; i++) {
+        for (let j = 1; j <= m; j++) {
+            dp[i][j] = refWords[i - 1] === typedWords[j - 1]
+                ? dp[i - 1][j - 1] + 1
+                : Math.max(dp[i - 1][j], dp[i][j - 1]);
+        }
+    }
+    let i = n, j = m;
+    while (i > 0 && j > 0) {
+        if (refWords[i - 1] === typedWords[j - 1]) { matchedRef[i - 1] = true; i--; j--; }
+        else if (dp[i - 1][j] >= dp[i][j - 1]) i--;
+        else j--;
+    }
+    return { correct: dp[n][m], total: n, refWords, matchedRef };
+}
+
 class RevisionItemView extends ItemView {
     queue: TFile[] = [];
     currentIndex: number = 0;
@@ -118,6 +180,10 @@ class RevisionItemView extends ItemView {
     btnBack: HTMLButtonElement;
     btnNext: HTMLButtonElement;
     btnFinish: HTMLButtonElement;
+    btnType: HTMLButtonElement;      // typed-recall toggle (only when enabled in settings)
+    typePanel: HTMLElement;          // "type it from memory" panel
+    typeInput: HTMLTextAreaElement;
+    typeResult: HTMLElement;
 
     constructor(leaf: WorkspaceLeaf, public plugin: EchoRecallPlugin) {
         super(leaf);
@@ -158,6 +224,20 @@ class RevisionItemView extends ItemView {
             this.scrollPos = this.mdContainer.scrollTop;
         });
 
+        // Optional typed-recall panel (hidden until toggled). Scores what you type vs the note.
+        this.typePanel = container.createDiv('echo-type-panel');
+        this.typeInput = this.typePanel.createEl('textarea', {
+            cls: 'echo-type-input',
+            attr: { placeholder: 'Type the passage from memory, then press Check…' }
+        });
+        const typeBar = this.typePanel.createDiv('echo-type-bar');
+        const checkBtn = typeBar.createEl('button', { text: 'Check', cls: 'echo-btn echo-btn-primary' });
+        checkBtn.onclick = () => this.checkTyped();
+        const clearBtn = typeBar.createEl('button', { text: 'Clear', cls: 'echo-btn echo-btn-secondary' });
+        clearBtn.onclick = () => { this.typeInput.value = ''; this.typeResult.empty(); this.typeInput.focus(); };
+        this.typeResult = this.typePanel.createDiv('echo-type-result');
+        this.typePanel.style.display = 'none';
+
         this.bottomSection = container.createDiv('echo-bottom-section');
         
         this.btnBack = this.bottomSection.createEl('button', { text: 'Back', cls: 'echo-btn echo-btn-secondary echo-btn-nav' });
@@ -168,7 +248,10 @@ class RevisionItemView extends ItemView {
         this.bottomDirectiveText = this.bottomSection.createDiv('echo-bottom-directive-text');
 
         const rightControls = this.bottomSection.createDiv('echo-controls-right');
-        
+
+        this.btnType = rightControls.createEl('button', { text: '⌨ Type', cls: 'echo-btn echo-btn-nav echo-btn-secondary' });
+        this.btnType.onclick = () => this.toggleTypePanel();
+
         this.btnNext = rightControls.createEl('button', { text: 'Next', cls: 'echo-btn echo-btn-nav echo-btn-active' });
         this.btnNext.onclick = () => { 
             if (this.currentStep < 3) { this.currentStep++; this.updateStepUI(); }
@@ -183,6 +266,12 @@ class RevisionItemView extends ItemView {
         this.scrollPos = 0;
         this.originalTexts = new WeakMap();
         this.isDomWrapped = false;
+
+        // Reset the typed-recall panel for the new note.
+        this.typePanel.style.display = 'none';
+        this.btnType.removeClass('echo-btn-active');
+        this.typeInput.value = '';
+        this.typeResult.empty();
 
         const file = this.queue[this.currentIndex];
         const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
@@ -225,9 +314,46 @@ class RevisionItemView extends ItemView {
             this.btnFinish.textContent = (this.currentIndex < this.queue.length - 1) ? "Finish & Next Note" : "Finish & Log";
         }
 
+        this.btnType.style.display = this.plugin.settings.enableTypedRecall ? 'block' : 'none';
+
         const exactScroll = this.mdContainer.scrollTop;
         this.applyMaskToDOM();
         this.mdContainer.scrollTop = exactScroll;
+    }
+
+    toggleTypePanel() {
+        const showing = this.typePanel.style.display !== 'none';
+        this.typePanel.style.display = showing ? 'none' : 'block';
+        this.btnType.toggleClass('echo-btn-active', !showing);
+        if (!showing) this.typeInput.focus();
+    }
+
+    // Reconstruct the note's plain text from the wrapped originals (unmasked), for scoring.
+    getPlainReference(): string {
+        const wrappers = this.mdContainer.querySelectorAll('.echo-text-wrapper');
+        if (wrappers.length) {
+            let out = '';
+            wrappers.forEach(w => { out += (this.originalTexts.get(w as HTMLElement) ?? w.textContent ?? '') + ' '; });
+            return out;
+        }
+        return this.mdContainer.textContent || '';
+    }
+
+    checkTyped() {
+        const { correct, total, refWords, matchedRef } = scoreRecall(this.getPlainReference(), this.typeInput.value);
+        const pct = total ? Math.round((correct / total) * 100) : 0;
+
+        this.typeResult.empty();
+        const summary = this.typeResult.createDiv('echo-type-summary');
+        summary.setText(total ? `${pct}%  ·  ${correct} of ${total} words recalled` : 'Nothing to score yet.');
+        summary.addClass(pct >= 90 ? 'echo-score-high' : pct >= 60 ? 'echo-score-mid' : 'echo-score-low');
+
+        if (total) {
+            const detail = this.typeResult.createDiv('echo-type-detail');
+            refWords.forEach((w, idx) => {
+                detail.createSpan({ text: w + ' ', cls: matchedRef[idx] ? 'echo-word-hit' : 'echo-word-miss' });
+            });
+        }
     }
 
     applyMaskToDOM() {
@@ -241,6 +367,7 @@ class RevisionItemView extends ItemView {
         if (this.confidence === 'Easy' && targetPct > 0) targetPct += 20;
 
         const ratio = targetPct / 100;
+        const cue = cueForStep(this.plugin.settings.cueMode, this.currentStep);
 
         // Wrap text in DOM elements for clickable Cheating mode
         if (!this.isDomWrapped) {
@@ -316,10 +443,11 @@ class RevisionItemView extends ItemView {
                 const rnd = x - Math.floor(x);
 
                 if (rnd < ratio) {
+                    const masked = maskWord(match, cue);
                     if (s.enableQuickLook) {
-                        return `<span class="echo-blank" data-word="${match}">` + '_'.repeat(match.length) + `</span>`;
+                        return `<span class="echo-blank" data-word="${match}">` + masked + `</span>`;
                     } else {
-                        return '_'.repeat(match.length);
+                        return masked;
                     }
                 }
                 return match;
@@ -884,6 +1012,18 @@ export default class EchoRecallPlugin extends Plugin {
         .echo-blank:hover { color: var(--text-muted); }
         .echo-blank.revealed { color: var(--text-error); cursor: default; }
 
+        .echo-type-panel { flex-shrink: 0; margin-top: 12px; padding: 14px; border-radius: 12px; background: var(--background-secondary); border: 1px solid var(--background-modifier-border); }
+        .echo-type-input { width: 100%; min-height: 90px; resize: vertical; border-radius: 8px; border: 1px solid var(--background-modifier-border); background: var(--background-primary); color: var(--text-normal); padding: 10px; font-family: var(--font-text); font-size: 1em; line-height: 1.5; box-sizing: border-box; }
+        .echo-type-bar { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
+        .echo-type-result { margin-top: 12px; }
+        .echo-type-summary { font-weight: 700; font-size: 1.1em; margin-bottom: 8px; }
+        .echo-score-high { color: #43b569; }
+        .echo-score-mid { color: #db9928; }
+        .echo-score-low { color: #df4c4c; }
+        .echo-type-detail { line-height: 1.7; }
+        .echo-word-hit { color: var(--text-muted); }
+        .echo-word-miss { color: var(--text-error); background: rgba(223, 76, 76, 0.12); border-radius: 4px; padding: 0 3px; }
+
         @media (max-width: 600px) {
             .echo-view-container { padding: 10px; position: relative; }
             .echo-dash-header { flex-direction: column; gap: 15px; align-items: flex-start; }
@@ -963,6 +1103,32 @@ class EchoRecallSettingsTab extends PluginSettingTab {
         containerEl.createEl('h2', { text: 'Echo Recall Settings' });
         containerEl.createEl('p', { text: 'Configure which elements should be bypassed by the text masking engine.', cls: 'setting-item-description' });
         containerEl.createEl('br');
+
+        new Setting(containerEl)
+            .setName("Cueing mode")
+            .setDesc("How masked words appear. Blank: full underscores (original). First letter: keep "
+                + "the first letter as a hint (w____). Graduated: show the first letter on the lighter "
+                + "masking step, then withdraw it to full blanks on the heavy step.")
+            .addDropdown(drop => drop
+                .addOption('blank', 'Blank (____)')
+                .addOption('first-letter', 'First letter (w___)')
+                .addOption('graduated', 'Graduated (withdraw the cue)')
+                .setValue(this.plugin.settings.cueMode)
+                .onChange(async (val) => {
+                    this.plugin.settings.cueMode = val as 'blank' | 'first-letter' | 'graduated';
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(containerEl)
+            .setName("Enable typed recall")
+            .setDesc("Adds a '⌨ Type' button in a session to type the passage from memory and score it "
+                + "against the note (word-level accuracy).")
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.enableTypedRecall)
+                .onChange(async (val) => {
+                    this.plugin.settings.enableTypedRecall = val;
+                    await this.plugin.saveSettings();
+                }));
 
         new Setting(containerEl)
             .setName("Enable Quick-Look and Cheating Mode")
