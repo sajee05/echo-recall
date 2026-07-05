@@ -1,6 +1,6 @@
 import {
     App, Plugin, PluginSettingTab, Setting, ItemView, WorkspaceLeaf, Notice,
-    TFile, MarkdownRenderer, setIcon, MarkdownView
+    TFile, MarkdownRenderer, setIcon, MarkdownView, Modal
 } from 'obsidian';
 
 const ECHO_DASHBOARD_VIEW_TYPE = 'echo-dashboard-view';
@@ -15,6 +15,12 @@ interface EchoRecallSettings {
     excludeEmbeds: boolean;
     customRegex: string;
     enableQuickLook: boolean;
+    schedulingMode: 'confidence' | 'sm2';
+    cueMode: 'blank' | 'first-letter' | 'graduated';
+    enableTypedRecall: boolean;
+    chunkMode: 'off' | 'paragraph' | 'sentence';
+    interleaveDueQueue: boolean;
+    sm2SimplifyGrades: boolean; // Feature 5: Simplify grades
 }
 
 const DEFAULT_SETTINGS: EchoRecallSettings = {
@@ -25,8 +31,16 @@ const DEFAULT_SETTINGS: EchoRecallSettings = {
     excludeExternalLinks: true,
     excludeEmbeds: true,
     customRegex: '',
-    enableQuickLook: true
+    enableQuickLook: true,
+    schedulingMode: 'confidence',
+    cueMode: 'blank',
+    enableTypedRecall: false,
+    chunkMode: 'off',
+    interleaveDueQueue: false,
+    sm2SimplifyGrades: false
 };
+
+const LEECH_REVISIONS = 8;
 
 interface EchoFrontmatter {
     echo_date_added?: string;
@@ -38,6 +52,10 @@ interface EchoFrontmatter {
     echo_deadline?: string;
     echo_history?: string[];
     echo_archived?: boolean;
+    echo_ease?: number;      
+    echo_interval?: number;  
+    echo_reps?: number;      
+    echo_past_grades?: string[]; // Feature 4: Store history
 }
 
 interface DashboardNoteData {
@@ -53,28 +71,78 @@ interface DashboardNoteData {
     deadline: string;
     history: string[];
     archived: boolean;
+    isLeech: boolean;
+    pastGrades: string[];
+}
+
+function interleaveByTag(data: DashboardNoteData[]): TFile[] {
+    const groups = new Map<string, TFile[]>();
+    for (const d of data) {
+        const key = d.tags.length ? d.tags[0] : '__untagged__';
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key)!.push(d.file);
+    }
+    const lists = Array.from(groups.values());
+    const out: TFile[] = [];
+    for (let i = 0, added = true; added; i++) {
+        added = false;
+        for (const list of lists) {
+            if (i < list.length) { out.push(list[i]); added = true; }
+        }
+    }
+    return out;
 }
 
 function getToday(): string {
     return window.moment().format('YYYY-MM-DD');
 }
 
+function deadlineCap(days: number, deadlineStr?: string): number {
+    if (!deadlineStr) return days;
+    const daysRemaining = window.moment(deadlineStr, 'YYYY-MM-DD').diff(window.moment(), 'days');
+    if (daysRemaining > 0 && daysRemaining < days) {
+        return Math.max(1, Math.floor(daysRemaining * 0.5));
+    }
+    return days;
+}
+
 function calculateNextDue(confidence: string, deadlineStr?: string): string {
-    let days = 1; 
+    let days = 1;
     if (confidence === 'Moderate') days = 7;
     if (confidence === 'Easy') days = 14;
-
-    if (deadlineStr && confidence !== 'Easy') {
-        const today = window.moment();
-        const deadlineDate = window.moment(deadlineStr, 'YYYY-MM-DD');
-        const daysRemaining = deadlineDate.diff(today, 'days');
-        
-        if (daysRemaining > 0 && daysRemaining < days) {
-            days = Math.max(1, Math.floor(daysRemaining * 0.5));
-        }
-    }
-
+    if (confidence !== 'Easy') days = deadlineCap(days, deadlineStr);
     return window.moment().add(days, 'days').format('YYYY-MM-DD');
+}
+
+type EchoGrade = 'Again' | 'Hard' | 'Good' | 'Easy';
+const SM2_QUALITY: Record<EchoGrade, number> = { Again: 1, Hard: 3, Good: 4, Easy: 5 };
+
+interface Sm2State { ease: number; interval: number; reps: number; }
+
+function sm2(state: Sm2State, quality: number): Sm2State {
+    let { ease, interval, reps } = state;
+    if (quality < 3) {
+        reps = 0;
+        interval = 1;
+    } else {
+        reps += 1;
+        interval = reps === 1 ? 1 : (reps === 2 ? 6 : Math.round(interval * ease));
+    }
+    ease = Math.max(1.3, ease + (0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02)));
+    ease = Math.round(ease * 100) / 100;
+    return { ease, interval, reps };
+}
+
+function confidenceFromEase(ease: number): 'Hard' | 'Moderate' | 'Easy' {
+    if (ease >= 2.6) return 'Easy';
+    if (ease >= 2.2) return 'Moderate';
+    return 'Hard';
+}
+
+function seedEaseFromConfidence(confidence?: string): number {
+    if (confidence === 'Hard') return 2.3;
+    if (confidence === 'Easy') return 2.7;
+    return 2.5;
 }
 
 async function updateNoteFrontmatter(app: App, file: TFile, updates: Partial<EchoFrontmatter>) {
@@ -88,6 +156,10 @@ async function updateNoteFrontmatter(app: App, file: TFile, updates: Partial<Ech
         if (updates.echo_deadline !== undefined) fm['echo_deadline'] = updates.echo_deadline;
         if (updates.echo_history !== undefined) fm['echo_history'] = updates.echo_history;
         if (updates.echo_archived !== undefined) fm['echo_archived'] = updates.echo_archived;
+        if (updates.echo_ease !== undefined) fm['echo_ease'] = updates.echo_ease;
+        if (updates.echo_interval !== undefined) fm['echo_interval'] = updates.echo_interval;
+        if (updates.echo_reps !== undefined) fm['echo_reps'] = updates.echo_reps;
+        if (updates.echo_past_grades !== undefined) fm['echo_past_grades'] = updates.echo_past_grades;
     });
 }
 
@@ -97,6 +169,103 @@ function extractFrontmatter(text: string): { frontmatter: string, body: string }
         return { frontmatter: match[0], body: text.slice(match[0].length) };
     }
     return { frontmatter: '', body: text };
+}
+
+type CueKind = 'blank' | 'first-letter';
+
+function cueForStep(mode: 'blank' | 'first-letter' | 'graduated', step: number): CueKind {
+    if (mode === 'first-letter') return 'first-letter';
+    if (mode === 'graduated') return step >= 3 ? 'blank' : 'first-letter';
+    return 'blank';
+}
+
+function maskWord(word: string, cue: CueKind): string {
+    if (cue === 'first-letter' && word.length > 1) {
+        return word[0] + '_'.repeat(word.length - 1);
+    }
+    return '_'.repeat(word.length);
+}
+
+function normalizeWords(text: string): string[] {
+    return text.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').split(/\s+/).filter(Boolean);
+}
+
+function scoreRecall(reference: string, typed: string):
+    { correct: number; total: number; refWords: string[]; matchedRef: boolean[] } {
+    const refWords = normalizeWords(reference);
+    const typedWords = normalizeWords(typed);
+    const n = refWords.length;
+    const m = typedWords.length;
+    const matchedRef = new Array(n).fill(false);
+    if (n === 0 || m === 0 || n * m > 4_000_000) {
+        return { correct: 0, total: n, refWords, matchedRef };
+    }
+    const dp: number[][] = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+    for (let i = 1; i <= n; i++) {
+        for (let j = 1; j <= m; j++) {
+            dp[i][j] = refWords[i - 1] === typedWords[j - 1]
+                ? dp[i - 1][j - 1] + 1
+                : Math.max(dp[i - 1][j], dp[i][j - 1]);
+        }
+    }
+    let i = n, j = m;
+    while (i > 0 && j > 0) {
+        if (refWords[i - 1] === typedWords[j - 1]) { matchedRef[i - 1] = true; i--; j--; }
+        else if (dp[i - 1][j] >= dp[i][j - 1]) i--;
+        else j--;
+    }
+    return { correct: dp[n][m], total: n, refWords, matchedRef };
+}
+
+// Feature 1: Context-Aware Paragraph Chunking
+function splitChunks(body: string, mode: 'paragraph' | 'sentence'): string[] {
+    const text = body.trim();
+    if (!text) return [body];
+    
+    if (mode === 'sentence') {
+        const parts = text.split(/(?<=[.!?]["'”’)\]]?)\s+(?=["'“‘([]?[A-Z0-9])/);
+        const chunks = parts.map(s => s.trim()).filter(Boolean);
+        return chunks.length ? chunks : [body];
+    }
+    
+    // Paragraph mode with context preservation
+    const rawParagraphs = text.split(/\n\s*\n+/);
+    const chunks: string[] = [];
+    const currentHeadings: { level: number, text: string }[] = [];
+
+    for (let i = 0; i < rawParagraphs.length; i++) {
+        const p = rawParagraphs[i].trim();
+        if (!p) continue;
+
+        const lines = p.split('\n');
+        let allHeadings = true;
+        for (const line of lines) {
+            if (!line.match(/^#{1,6}\s/)) {
+                allHeadings = false;
+                break;
+            }
+        }
+
+        for (const line of lines) {
+            const m = line.match(/^(#{1,6})\s+(.*)/);
+            if (m) {
+                const level = m[1].length;
+                while (currentHeadings.length > 0 && currentHeadings[currentHeadings.length - 1].level >= level) {
+                    currentHeadings.pop();
+                }
+                currentHeadings.push({ level, text: line });
+            }
+        }
+
+        if (allHeadings) continue;
+
+        let contextStr = "";
+        for (const h of currentHeadings) {
+            if (!p.includes(h.text)) contextStr += h.text + "\n\n";
+        }
+        chunks.push((contextStr + p).trim());
+    }
+    return chunks.length ? chunks : [body];
 }
 
 class RevisionItemView extends ItemView {
@@ -109,8 +278,14 @@ class RevisionItemView extends ItemView {
     originalTexts: WeakMap<HTMLElement | Text, string> = new WeakMap();
     isDomWrapped: boolean = false;
 
+    chunks: string[] = [];       
+    currentChunk: number = 0;
+    originalFullBody: string = "";
+    file: TFile;
+
     headerTitle: HTMLElement;
     headerCount: HTMLElement;
+    peekBtn: HTMLElement; // Feature 2
     topDirective: HTMLElement;
     mdContainer: HTMLElement;
     bottomSection: HTMLElement;
@@ -118,6 +293,11 @@ class RevisionItemView extends ItemView {
     btnBack: HTMLButtonElement;
     btnNext: HTMLButtonElement;
     btnFinish: HTMLButtonElement;
+    gradeBar: HTMLElement;   
+    btnType: HTMLButtonElement;      
+    typePanel: HTMLElement;          
+    typeInput: HTMLTextAreaElement;
+    typeResult: HTMLElement;
 
     constructor(leaf: WorkspaceLeaf, public plugin: EchoRecallPlugin) {
         super(leaf);
@@ -149,6 +329,10 @@ class RevisionItemView extends ItemView {
         this.headerTitle = headerDiv.createEl('h2');
         this.headerCount = headerDiv.createEl('span', { cls: 'echo-badge' });
 
+        this.peekBtn = headerDiv.createEl('button', { cls: 'echo-icon-btn echo-peek-btn echo-tooltip', attr: { 'aria-label': 'Peek full note' } });
+        setIcon(this.peekBtn, 'eye');
+        this.peekBtn.onclick = () => this.showPeekModal();
+
         this.topDirective = container.createDiv('echo-top-directive');
 
         const mdContainerWrapper = container.createDiv('echo-markdown-wrapper');
@@ -157,6 +341,19 @@ class RevisionItemView extends ItemView {
         this.mdContainer.addEventListener('scroll', () => {
             this.scrollPos = this.mdContainer.scrollTop;
         });
+
+        this.typePanel = container.createDiv('echo-type-panel');
+        this.typeInput = this.typePanel.createEl('textarea', {
+            cls: 'echo-type-input',
+            attr: { placeholder: 'Type the passage from memory, then press Check…' }
+        });
+        const typeBar = this.typePanel.createDiv('echo-type-bar');
+        const checkBtn = typeBar.createEl('button', { text: 'Check', cls: 'echo-btn echo-btn-primary' });
+        checkBtn.onclick = () => this.checkTyped();
+        const clearBtn = typeBar.createEl('button', { text: 'Clear', cls: 'echo-btn echo-btn-secondary' });
+        clearBtn.onclick = () => { this.typeInput.value = ''; this.typeResult.empty(); this.typeInput.focus(); };
+        this.typeResult = this.typePanel.createDiv('echo-type-result');
+        this.typePanel.style.display = 'none';
 
         this.bottomSection = container.createDiv('echo-bottom-section');
         
@@ -168,39 +365,85 @@ class RevisionItemView extends ItemView {
         this.bottomDirectiveText = this.bottomSection.createDiv('echo-bottom-directive-text');
 
         const rightControls = this.bottomSection.createDiv('echo-controls-right');
-        
+
+        this.btnType = rightControls.createEl('button', { text: '⌨ Type', cls: 'echo-btn echo-btn-nav echo-btn-secondary' });
+        this.btnType.onclick = () => this.toggleTypePanel();
+
         this.btnNext = rightControls.createEl('button', { text: 'Next', cls: 'echo-btn echo-btn-nav echo-btn-active' });
         this.btnNext.onclick = () => { 
             if (this.currentStep < 3) { this.currentStep++; this.updateStepUI(); }
         };
 
         this.btnFinish = rightControls.createEl('button', { text: 'Finish & Log', cls: 'echo-btn echo-btn-primary echo-btn-nav' });
-        this.btnFinish.onclick = async () => { await this.logAndNext(); };
+        this.btnFinish.onclick = async () => { await this.advanceOrFinish(); };
+
+        this.gradeBar = rightControls.createDiv('echo-grade-bar');
+        this.gradeBar.style.display = 'none';
     }
 
     async loadCurrentNote() {
+        this.file = this.queue[this.currentIndex];
+        const fm = this.app.metadataCache.getFileCache(this.file)?.frontmatter;
+        this.confidence = fm?.echo_confidence || 'Hard';
+
+        this.headerTitle.textContent = `Revising: ${this.file.basename}`;
+
+        const rawText = await this.app.vault.read(this.file);
+        const { body } = extractFrontmatter(rawText);
+        this.originalFullBody = body;
+
+        const mode = this.plugin.settings.chunkMode;
+        this.chunks = mode === 'off' ? [body] : splitChunks(body, mode);
+        this.currentChunk = 0;
+
+        await this.renderCurrentChunk();
+    }
+
+    async renderCurrentChunk() {
         this.currentStep = 1;
         this.scrollPos = 0;
         this.originalTexts = new WeakMap();
         this.isDomWrapped = false;
 
-        const file = this.queue[this.currentIndex];
-        const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
-        this.confidence = fm?.echo_confidence || 'Hard';
+        this.typePanel.style.display = 'none';
+        this.btnType.removeClass('echo-btn-active');
+        this.typeInput.value = '';
+        this.typeResult.empty();
 
-        this.headerTitle.textContent = `Revising: ${file.basename}`;
-        this.headerCount.textContent = `Note ${this.currentIndex + 1} of ${this.queue.length}`;
-
-        const rawText = await this.app.vault.read(file);
-        const { body } = extractFrontmatter(rawText);
+        const total = this.chunks.length;
+        this.headerCount.textContent = total > 1
+            ? `Note ${this.currentIndex + 1}/${this.queue.length} · chunk ${this.currentChunk + 1}/${total}`
+            : `Note ${this.currentIndex + 1} of ${this.queue.length}`;
 
         this.mdContainer.empty();
-        await MarkdownRenderer.render(this.app, body, this.mdContainer, file.path, this);
+        await MarkdownRenderer.render(this.app, this.chunks[this.currentChunk], this.mdContainer, this.file.path, this);
 
         this.updateStepUI();
     }
 
+    async advanceOrFinish() {
+        if (this.currentChunk < this.chunks.length - 1) {
+            this.currentChunk++;
+            await this.renderCurrentChunk();
+        } else {
+            await this.logAndNext();
+        }
+    }
+
+    showPeekModal() {
+        const modal = new Modal(this.app);
+        modal.titleEl.setText('Peek: ' + this.file.basename);
+        modal.contentEl.addClass('echo-markdown-content', 'markdown-rendered');
+        modal.contentEl.style.padding = '30px';
+        MarkdownRenderer.render(this.app, this.originalFullBody, modal.contentEl, this.file.path, this);
+        modal.open();
+    }
+
     updateStepUI() {
+        const sm2Mode = this.plugin.settings.schedulingMode === 'sm2';
+        
+        this.peekBtn.style.display = this.currentStep === 3 ? 'none' : 'flex';
+
         if (this.currentStep === 1) {
             this.topDirective.innerHTML = "<span>Firstly, <strong style='color: var(--text-error)'>say it</strong> at least a few times.</span>";
             this.bottomDirectiveText.innerHTML = "It's best to repeat this step until you know the flow of the text.";
@@ -208,6 +451,7 @@ class RevisionItemView extends ItemView {
             this.btnBack.style.opacity = '0.3';
             this.btnNext.style.display = 'block';
             this.btnFinish.style.display = 'none';
+            this.gradeBar.style.display = 'none';
         } else if (this.currentStep === 2) {
             this.topDirective.innerHTML = "<span>Secondly, <strong style='color: var(--text-error)'>say it without mistakes.</strong></span>";
             this.bottomDirectiveText.innerHTML = "Make sure you're comfortable with every line of the text.";
@@ -215,19 +459,82 @@ class RevisionItemView extends ItemView {
             this.btnBack.style.opacity = '1';
             this.btnNext.style.display = 'block';
             this.btnFinish.style.display = 'none';
+            this.gradeBar.style.display = 'none';
         } else {
             this.topDirective.innerHTML = "<span>Thirdly, <strong style='color: var(--text-error)'>say it without pausing.</strong></span>";
-            this.bottomDirectiveText.innerHTML = "If you're unsure about a word, go back two steps and reread that part.";
             this.btnBack.disabled = false;
             this.btnBack.style.opacity = '1';
             this.btnNext.style.display = 'none';
-            this.btnFinish.style.display = 'block';
-            this.btnFinish.textContent = (this.currentIndex < this.queue.length - 1) ? "Finish & Next Note" : "Finish & Log";
+            const isLastChunk = this.currentChunk >= this.chunks.length - 1;
+            
+            if (!isLastChunk) {
+                this.bottomDirectiveText.innerHTML = "If you're unsure about a word, go back two steps and reread that part.";
+                this.btnFinish.style.display = 'block';
+                this.btnFinish.textContent = "Next chunk";
+                this.gradeBar.style.display = 'none';
+            } else if (sm2Mode) {
+                this.bottomDirectiveText.innerHTML = "How did that go? Grade your recall to schedule the next review.";
+                this.btnFinish.style.display = 'none';
+                this.gradeBar.style.display = 'flex';
+                
+                // Feature 5: Update Grades
+                this.gradeBar.empty();
+                const grades: EchoGrade[] = this.plugin.settings.sm2SimplifyGrades ? ['Again', 'Good'] : ['Again', 'Hard', 'Good', 'Easy'];
+                grades.forEach(g => {
+                    const b = this.gradeBar.createEl('button', {
+                        text: g,
+                        cls: `echo-btn echo-btn-nav echo-grade echo-grade-${g.toLowerCase()}`
+                    });
+                    b.onclick = async () => { await this.logAndNext(SM2_QUALITY[g]); };
+                });
+
+            } else {
+                this.bottomDirectiveText.innerHTML = "If you're unsure about a word, go back two steps and reread that part.";
+                this.btnFinish.style.display = 'block';
+                this.gradeBar.style.display = 'none';
+                this.btnFinish.textContent = (this.currentIndex < this.queue.length - 1) ? "Finish & Next Note" : "Finish & Log";
+            }
         }
+
+        this.btnType.style.display = this.plugin.settings.enableTypedRecall ? 'block' : 'none';
 
         const exactScroll = this.mdContainer.scrollTop;
         this.applyMaskToDOM();
         this.mdContainer.scrollTop = exactScroll;
+    }
+
+    toggleTypePanel() {
+        const showing = this.typePanel.style.display !== 'none';
+        this.typePanel.style.display = showing ? 'none' : 'block';
+        this.btnType.toggleClass('echo-btn-active', !showing);
+        if (!showing) this.typeInput.focus();
+    }
+
+    getPlainReference(): string {
+        const wrappers = this.mdContainer.querySelectorAll('.echo-text-wrapper');
+        if (wrappers.length) {
+            let out = '';
+            wrappers.forEach(w => { out += (this.originalTexts.get(w as HTMLElement) ?? w.textContent ?? '') + ' '; });
+            return out;
+        }
+        return this.mdContainer.textContent || '';
+    }
+
+    checkTyped() {
+        const { correct, total, refWords, matchedRef } = scoreRecall(this.getPlainReference(), this.typeInput.value);
+        const pct = total ? Math.round((correct / total) * 100) : 0;
+
+        this.typeResult.empty();
+        const summary = this.typeResult.createDiv('echo-type-summary');
+        summary.setText(total ? `${pct}%  ·  ${correct} of ${total} words recalled` : 'Nothing to score yet.');
+        summary.addClass(pct >= 90 ? 'echo-score-high' : pct >= 60 ? 'echo-score-mid' : 'echo-score-low');
+
+        if (total) {
+            const detail = this.typeResult.createDiv('echo-type-detail');
+            refWords.forEach((w, idx) => {
+                detail.createSpan({ text: w + ' ', cls: matchedRef[idx] ? 'echo-word-hit' : 'echo-word-miss' });
+            });
+        }
     }
 
     applyMaskToDOM() {
@@ -241,8 +548,8 @@ class RevisionItemView extends ItemView {
         if (this.confidence === 'Easy' && targetPct > 0) targetPct += 20;
 
         const ratio = targetPct / 100;
+        const cue = cueForStep(this.plugin.settings.cueMode, this.currentStep);
 
-        // Wrap text in DOM elements for clickable Cheating mode
         if (!this.isDomWrapped) {
             const walker = document.createTreeWalker(this.mdContainer, NodeFilter.SHOW_TEXT, null);
             const textNodes: Text[] = [];
@@ -301,14 +608,13 @@ class RevisionItemView extends ItemView {
                 } catch (e) {}
             }
 
-            // Protect HTML Entities to prevent corrupting apostrophes and quotes
             processed = processed.replace(/[&<>'"]/g, match => {
                 placeholders.push(escapedMap[match] || match);
                 return `\x01${placeholders.length - 1}\x02`;
             });
 
             processed = processed.replace(/(\x01\d+\x02|[\p{L}\p{N}]+)/gu, (match) => {
-                if (match.startsWith('\x01')) return match; // skip protected element
+                if (match.startsWith('\x01')) return match; 
 
                 wordIndex++;
                 const seed = wordIndex;
@@ -316,16 +622,16 @@ class RevisionItemView extends ItemView {
                 const rnd = x - Math.floor(x);
 
                 if (rnd < ratio) {
+                    const masked = maskWord(match, cue);
                     if (s.enableQuickLook) {
-                        return `<span class="echo-blank" data-word="${match}">` + '_'.repeat(match.length) + `</span>`;
+                        return `<span class="echo-blank" data-word="${match}">` + masked + `</span>`;
                     } else {
-                        return '_'.repeat(match.length);
+                        return masked;
                     }
                 }
                 return match;
             });
 
-            // Restore protected variables
             processed = processed.replace(/\x01(\d+)\x02/g, (_, idx) => {
                 return placeholders[parseInt(idx, 10)];
             });
@@ -346,25 +652,50 @@ class RevisionItemView extends ItemView {
         });
     }
 
-    async logAndNext() {
-        const file = this.queue[this.currentIndex];
-        const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
-        
+    async logAndNext(quality?: number) {
+        const fm = this.app.metadataCache.getFileCache(this.file)?.frontmatter;
+
         const confidence = fm?.echo_confidence || 'Hard';
         const deadline = fm?.echo_deadline;
-        
+
         const history = Array.isArray(fm?.echo_history) ? fm.echo_history : [];
         history.push(getToday());
 
-        await updateNoteFrontmatter(this.app, file, {
+        const updates: Partial<EchoFrontmatter> = {
             echo_last_revised: getToday(),
             echo_revision_count: (fm?.echo_revision_count || 0) + 1,
-            echo_next_due: calculateNextDue(confidence, deadline),
             echo_date_added: fm?.echo_date_added || getToday(),
             echo_history: history
-        });
+        };
 
-        new Notice(`Logged revision for: ${file.basename}`);
+        // Feature 4: Record past grades
+        const gradesArr = Array.isArray(fm?.echo_past_grades) ? fm.echo_past_grades : [];
+        if (quality !== undefined) {
+            const gradeStr = Object.keys(SM2_QUALITY).find(key => SM2_QUALITY[key as EchoGrade] === quality) || 'Good';
+            gradesArr.push(gradeStr);
+            updates.echo_past_grades = gradesArr;
+        }
+
+        if (this.plugin.settings.schedulingMode === 'sm2' && quality !== undefined) {
+            const prev: Sm2State = {
+                ease: typeof fm?.echo_ease === 'number' ? fm.echo_ease : seedEaseFromConfidence(confidence),
+                interval: typeof fm?.echo_interval === 'number' ? fm.echo_interval : 0,
+                reps: typeof fm?.echo_reps === 'number' ? fm.echo_reps : 0
+            };
+            const next = sm2(prev, quality);
+            const cappedDays = deadlineCap(next.interval, deadline);
+            updates.echo_ease = next.ease;
+            updates.echo_interval = next.interval;
+            updates.echo_reps = next.reps;
+            updates.echo_next_due = window.moment().add(cappedDays, 'days').format('YYYY-MM-DD');
+            updates.echo_confidence = confidenceFromEase(next.ease);
+        } else {
+            updates.echo_next_due = calculateNextDue(confidence, deadline);
+        }
+
+        await updateNoteFrontmatter(this.app, this.file, updates);
+
+        new Notice(`Logged revision for: ${this.file.basename}`);
 
         this.currentIndex++;
         if (this.currentIndex < this.queue.length) {
@@ -380,6 +711,7 @@ class DashboardItemView extends ItemView {
     viewMode: 'all' | 'tags' | 'archives' = 'all';
     sortCol: keyof DashboardNoteData = 'nextDue';
     sortAsc: boolean = true;
+    heatmapOffsetDays: number = 0;
 
     constructor(leaf: WorkspaceLeaf, public plugin: EchoRecallPlugin) {
         super(leaf);
@@ -408,19 +740,23 @@ class DashboardItemView extends ItemView {
                 if (file instanceof TFile) {
                     const fm = cache.frontmatter;
                     const archived = fm.echo_archived === true;
+                    const revisions = fm.echo_revision_count || 0;
+                    const confidence = fm.echo_confidence || 'Hard';
                     data.push({
                         file,
                         dateAdded: fm.echo_date_added,
                         title: file.basename,
                         tags: Array.isArray(fm.echo_tags) ? fm.echo_tags : [],
-                        revisions: fm.echo_revision_count || 0,
+                        revisions: revisions,
                         lastRevised: fm.echo_last_revised || 'Never',
-                        confidence: fm.echo_confidence || 'Hard',
+                        confidence: confidence,
                         nextDue: fm.echo_next_due || getToday(),
                         deadline: fm.echo_deadline || '',
                         history: Array.isArray(fm.echo_history) ? fm.echo_history : [],
                         archived: archived,
-                        isDue: !archived && (fm.echo_next_due || getToday()) <= today
+                        isDue: !archived && (fm.echo_next_due || getToday()) <= today,
+                        isLeech: !archived && revisions >= LEECH_REVISIONS && confidence === 'Hard',
+                        pastGrades: Array.isArray(fm.echo_past_grades) ? fm.echo_past_grades : []
                     });
                 }
             }
@@ -446,8 +782,14 @@ class DashboardItemView extends ItemView {
         masterPlay.createSpan({ text: ' Start Due Notes' });
         masterPlay.onclick = () => {
             if (dueData.length === 0) return new Notice("No notes due today!");
-            this.plugin.startRevisionSession(dueData.map(d => d.file));
+            const files = this.plugin.settings.interleaveDueQueue
+                ? interleaveByTag(dueData)
+                : dueData.map(d => d.file);
+            this.plugin.startRevisionSession(files);
         };
+
+        // Feature 3: Advanced Analytics Panel
+        this.renderAnalytics(container, fullData);
 
         let displayData = fullData;
         if (this.viewMode === 'all' || this.viewMode === 'tags') {
@@ -524,24 +866,13 @@ class DashboardItemView extends ItemView {
                 if (notes.length === 0) return;
                 const groupHead = tbody.createEl('tr', { cls: 'echo-tag-header' });
                 
-                // Col 1: Tag Name
-                groupHead.createEl('td', { text: `#${tag}`, cls: 'echo-tag-name' });
-                
-                // Col 2: Notes Count
-                const titleTd = groupHead.createEl('td');
-                titleTd.innerHTML = `<span class="echo-badge">${notes.length} notes</span>`;
-                
-                // Col 3: Tags (Empty)
-                groupHead.createEl('td');
-                
-                // Col 4: Revs
+                const titleTd = groupHead.createEl('td', { colspan: 3 });
+                titleTd.innerHTML = `<div style="display:flex; align-items:center;"><strong>#${tag}</strong> <span class="echo-badge">${notes.length} notes</span></div>`;
+
                 const totalRevs = notes.reduce((sum, n) => sum + n.revisions, 0);
                 groupHead.createEl('td', { text: totalRevs.toString(), cls: 'echo-td-center' });
-                
-                // Col 5: Last Revised (Empty)
                 groupHead.createEl('td');
                 
-                // Col 6: Confidence
                 const hardCount = notes.filter(n => n.confidence === 'Hard').length;
                 const modCount = notes.filter(n => n.confidence === 'Moderate').length;
                 const easyCount = notes.filter(n => n.confidence === 'Easy').length;
@@ -560,7 +891,6 @@ class DashboardItemView extends ItemView {
                     </div>
                 `;
                 
-                // Col 7: Actions
                 const actionTd = groupHead.createEl('td');
                 const actionWrapper = actionTd.createDiv('echo-actions-cell');
                 actionWrapper.style.justifyContent = 'flex-start';
@@ -585,7 +915,6 @@ class DashboardItemView extends ItemView {
                     }
                 };
                 
-                // Col 8: Deadline
                 const deadlineTd = groupHead.createEl('td');
                 const deadlineInput = deadlineTd.createEl('input', { type: 'date', cls: 'echo-deadline-input' });
                 deadlineInput.title = "Apply deadline to all empty notes in this tag";
@@ -611,6 +940,120 @@ class DashboardItemView extends ItemView {
         `;
     }
 
+    renderAnalytics(container: HTMLElement, data: DashboardNoteData[]) {
+        const analyticsWrap = container.createDiv('echo-analytics-wrapper');
+        
+        // 1. Heatmap
+        const counts = new Map<string, number>();
+        for (const d of data) {
+            for (const day of d.history) counts.set(day, (counts.get(day) || 0) + 1);
+        }
+
+        const hmWrap = analyticsWrap.createDiv('echo-heatmap-wrapper');
+        const head = hmWrap.createDiv('echo-heatmap-head');
+        head.createSpan({ text: 'Revision activity', cls: 'echo-heatmap-title' });
+        
+        if (counts.size > 0) {
+            let max = 1;
+            counts.forEach(v => { if (v > max) max = v; });
+
+            const weeks = 26;
+            const total = Array.from(counts.values()).reduce((a, b) => a + b, 0);
+            head.createSpan({ text: `${total} revisions · last ${weeks} weeks`, cls: 'echo-heatmap-sub' });
+
+            const grid = hmWrap.createDiv('echo-heatmap-grid');
+            const startWeek = window.moment().startOf('week').subtract(weeks - 1, 'weeks');
+            const today = window.moment();
+            for (let w = 0; w < weeks; w++) {
+                const col = grid.createDiv('echo-heatmap-col');
+                for (let dow = 0; dow < 7; dow++) {
+                    const day = startWeek.clone().add(w, 'weeks').add(dow, 'days');
+                    const key = day.format('YYYY-MM-DD');
+                    const c = counts.get(key) || 0;
+                    const level = c === 0 ? 0 : Math.min(4, Math.max(1, Math.ceil((c / max) * 4)));
+                    const cell = col.createDiv(`echo-heatmap-cell echo-hm-${level}`);
+                    if (day.isAfter(today, 'day')) cell.addClass('echo-hm-future');
+                    const label = `${key}: ${c} revision${c === 1 ? '' : 's'}`;
+                    cell.setAttr('aria-label', label);
+                    cell.setAttr('title', label);
+                }
+            }
+        } else {
+            head.createSpan({ text: `0 revisions`, cls: 'echo-heatmap-sub' });
+        }
+
+        // 2. Stats
+        const statsWrap = analyticsWrap.createDiv('echo-stats-wrapper');
+        let totalRevs = 0, hard = 0, mod = 0, easy = 0, archived = 0, streak = 0;
+        const datesSet = new Set<string>();
+        
+        for (const d of data) {
+            totalRevs += d.revisions;
+            if (d.archived) archived++;
+            else if (d.confidence === 'Hard') hard++;
+            else if (d.confidence === 'Moderate') mod++;
+            else if (d.confidence === 'Easy') easy++;
+            for (const h of d.history) datesSet.add(h);
+        }
+        
+        const todayStr = window.moment().format('YYYY-MM-DD');
+        let checkDate = window.moment();
+        if (!datesSet.has(todayStr)) checkDate.subtract(1, 'days'); 
+        
+        while (datesSet.has(checkDate.format('YYYY-MM-DD'))) {
+            streak++;
+            checkDate.subtract(1, 'days');
+        }
+        
+        let avgDaily = 0;
+        if (datesSet.size > 0) {
+            const sortedDates = Array.from(datesSet).sort();
+            const firstDate = window.moment(sortedDates[0]);
+            const daysSinceFirst = Math.max(1, window.moment().diff(firstDate, 'days') + 1);
+            avgDaily = Math.round((totalRevs / daysSinceFirst) * 10) / 10;
+        }
+
+        statsWrap.innerHTML = `
+            <div><strong>Current streak:</strong> ${streak}🔥</div>
+            <div><strong>Total revisions:</strong> ${totalRevs}</div>
+            <div class="echo-stats-indent">Hard: ${hard}</div>
+            <div class="echo-stats-indent">Moderate: ${mod}</div>
+            <div class="echo-stats-indent">Easy: ${easy}</div>
+            <div class="echo-stats-indent">Archived: ${archived}</div>
+            <div><strong>Avg Daily Reviews:</strong> ${avgDaily}</div>
+        `;
+
+        // 3. Future Echoes
+        const futureWrap = analyticsWrap.createDiv('echo-future-wrapper');
+        futureWrap.createDiv({ text: 'Future Echoes:', cls: 'echo-future-title' });
+        
+        const futureCounts = [0, 0, 0, 0, 0, 0, 0]; 
+        for (const d of data) {
+            if (d.archived) continue;
+            const diff = window.moment(d.nextDue).startOf('day').diff(window.moment().startOf('day'), 'days');
+            if (diff <= 0) futureCounts[0]++; 
+            else if (diff > 0 && diff < 7) futureCounts[diff]++;
+        }
+        
+        const maxFuture = Math.max(1, ...futureCounts);
+        const dayNames = [];
+        for (let i=0; i<7; i++) dayNames.push(window.moment().add(i, 'days').format('ddd'));
+
+        const barsWrap = futureWrap.createDiv('echo-future-bars');
+        for (let i=0; i<7; i++) {
+            const row = barsWrap.createDiv('echo-future-row');
+            row.createDiv({ text: dayNames[i], cls: 'echo-future-day' });
+            
+            const barBox = row.createDiv('echo-future-barbox');
+            const pct = (futureCounts[i] / maxFuture) * 100;
+            const bar = barBox.createDiv('echo-future-bar');
+            bar.style.width = `${pct}%`;
+            if (i === 0) bar.style.backgroundColor = 'var(--interactive-accent)';
+            
+            row.createDiv({ text: `${futureCounts[i]}${i === 0 ? ' (today)' : ''}`, cls: i===0 ? 'echo-future-count echo-future-today' : 'echo-future-count' });
+        }
+    }
+
     renderRow(tbody: HTMLElement, data: DashboardNoteData) {
         const tr = tbody.createEl('tr');
         if (data.archived) tr.style.opacity = '0.7';
@@ -620,6 +1063,11 @@ class DashboardItemView extends ItemView {
         const tdTitle = tr.createEl('td');
         const titleLink = tdTitle.createEl('a', { text: data.title, cls: 'echo-title-link' });
         titleLink.onclick = () => this.app.workspace.getLeaf('tab').openFile(data.file);
+        if (data.isLeech) {
+            const leech = tdTitle.createSpan({ text: '🩸 leech', cls: 'echo-leech-pill' });
+            leech.setAttr('aria-label', `Reviewed ${data.revisions}× but still Hard — try re-chunking or elaborating.`);
+            leech.setAttr('title', `Reviewed ${data.revisions}× but still Hard — try re-chunking or elaborating.`);
+        }
 
         const tdTags = tr.createEl('td');
         const tagsWrapper = tdTags.createDiv('echo-inline-tags');
@@ -643,7 +1091,8 @@ class DashboardItemView extends ItemView {
         tr.createEl('td', { text: data.lastRevised, cls: 'echo-td-light' });
 
         const tdConf = tr.createEl('td');
-        const select = tdConf.createEl('select', { cls: `echo-conf-select echo-conf-${data.confidence.toLowerCase()}` });
+        const confWrap = tdConf.createDiv('echo-conf-col');
+        const select = confWrap.createEl('select', { cls: `echo-conf-select echo-conf-${data.confidence.toLowerCase()}` });
         ['Hard', 'Moderate', 'Easy'].forEach(opt => {
             const option = select.createEl('option', { value: opt, text: opt });
             if (opt === data.confidence) option.selected = true;
@@ -653,6 +1102,12 @@ class DashboardItemView extends ItemView {
             select.className = `echo-conf-select echo-conf-${val.toLowerCase()}`;
             await updateNoteFrontmatter(this.app, data.file, { echo_confidence: val });
         };
+        
+        // Feature 4: Past Grades visual
+        if (this.plugin.settings.schedulingMode === 'sm2' && data.pastGrades.length > 0) {
+            const past = data.pastGrades.slice(-3).join(' · ');
+            confWrap.createDiv({ text: past, cls: 'echo-past-grades' });
+        }
 
         const tdAction = tr.createEl('td');
         const actionWrapper = tdAction.createDiv('echo-actions-cell');
@@ -800,6 +1255,7 @@ export default class EchoRecallPlugin extends Plugin {
         const css = `
         .echo-view-container { padding: 20px; font-family: var(--font-interface); max-width: 1100px; width: 100%; margin: 0 auto; box-sizing: border-box; }
         .echo-badge { background: var(--background-modifier-hover); padding: 4px 10px; border-radius: 12px; font-size: 0.8em; font-weight: 500; white-space: nowrap; display: inline-block;}
+        .echo-peek-btn { margin-left: 10px; background: var(--background-modifier-hover); transition: color 0.2s; padding: 4px !important; }
         
         .echo-revision-layout { display: flex; flex-direction: column; height: 100%; }
         .echo-session-header { flex-shrink: 0; display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
@@ -830,6 +1286,24 @@ export default class EchoRecallPlugin extends Plugin {
         .echo-due-count { font-size: 3.5em; font-weight: 700; line-height: 1; color: var(--text-normal); }
         .echo-master-play { background: var(--interactive-accent); color: var(--text-on-accent); border: none; padding: 12px 24px; border-radius: 20px; font-size: 1.1em; cursor: pointer; display: flex; align-items: center; gap: 8px; font-weight: 600; box-shadow: 0 4px 12px rgba(0,0,0,0.1); transition: opacity 0.2s; }
         .echo-master-play:hover { opacity: 0.9; }
+
+        /* ADVANCED ANALYTICS PANEL */
+        .echo-analytics-wrapper { display: flex; gap: 20px; margin-bottom: 25px; flex-wrap: wrap; align-items: stretch; background: var(--background-secondary); border-radius: 12px; border: 1px solid var(--background-modifier-border); padding: 16px 20px;}
+        .echo-heatmap-wrapper { flex: 0 0 auto; display: flex; flex-direction: column; gap: 10px; border-right: 1px solid var(--background-modifier-border); padding-right: 20px;}
+        .echo-heatmap { margin: 0; padding: 0; border: none; background: transparent; }
+        
+        .echo-stats-wrapper { display: flex; flex-direction: column; gap: 4px; font-size: 0.9em; justify-content: center; border-right: 1px solid var(--background-modifier-border); padding-right: 20px; min-width: 140px;}
+        .echo-stats-indent { padding-left: 15px; color: var(--text-muted); }
+        
+        .echo-future-wrapper { display: flex; flex-direction: column; gap: 4px; font-size: 0.9em; flex-grow: 1; justify-content: center; min-width: 200px;}
+        .echo-future-title { font-weight: bold; margin-bottom: 4px; }
+        .echo-future-bars { display: flex; flex-direction: column; gap: 4px; }
+        .echo-future-row { display: flex; align-items: center; gap: 8px; }
+        .echo-future-day { width: 35px; color: var(--text-muted); }
+        .echo-future-barbox { flex-grow: 1; height: 10px; background: var(--background-modifier-border); border-radius: 4px; overflow: hidden; max-width: 250px; }
+        .echo-future-bar { height: 100%; background: var(--text-muted); transition: width 0.3s; }
+        .echo-future-count { width: 75px; font-size: 0.85em; }
+        .echo-future-today { color: var(--interactive-accent); font-weight: bold; }
 
         .echo-dash-controls { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
         .echo-toggles { display: flex; gap: 10px; background: var(--background-secondary); padding: 4px; border-radius: 10px; }
@@ -862,10 +1336,12 @@ export default class EchoRecallPlugin extends Plugin {
         .echo-deadline-input { border: 1px solid transparent; background: transparent; color: var(--text-normal); font-family: var(--font-interface); padding: 4px; font-size: 0.9em; border-radius: 6px; cursor: pointer; transition: background 0.2s, border 0.2s; white-space: nowrap; }
         .echo-deadline-input:hover, .echo-deadline-input:focus { border: 1px solid var(--background-modifier-border); background: var(--background-secondary); }
 
+        .echo-conf-col { display: flex; flex-direction: column; align-items: center; }
         .echo-conf-select { border: none; border-radius: 8px; padding: 4px 8px; font-size: 0.9em; cursor: pointer; font-weight: 500; }
         .echo-conf-hard { background: rgba(223, 76, 76, 0.1); color: #df4c4c; }
         .echo-conf-moderate { background: rgba(219, 153, 40, 0.1); color: #db9928; }
         .echo-conf-easy { background: rgba(67, 181, 105, 0.1); color: #43b569; }
+        .echo-past-grades { font-size: 0.75em; color: var(--text-muted); text-align: center; margin-top: 4px; font-weight: 500;}
         
         .echo-icon-btn { background: transparent; border: none; cursor: pointer; color: var(--text-muted); padding: 6px; border-radius: 6px; transition: background 0.2s, color 0.2s; display: flex; align-items: center; justify-content: center; }
         .echo-icon-btn:hover { background: var(--interactive-accent); color: var(--text-on-accent); }
@@ -884,57 +1360,52 @@ export default class EchoRecallPlugin extends Plugin {
         .echo-blank:hover { color: var(--text-muted); }
         .echo-blank.revealed { color: var(--text-error); cursor: default; }
 
+        .echo-grade-bar { display: flex; gap: 8px; align-items: center; }
+        .echo-grade { min-width: 72px; border: 1px solid var(--background-modifier-border); }
+        .echo-grade-again { background: rgba(223, 76, 76, 0.12); color: #df4c4c; }
+        .echo-grade-hard { background: rgba(219, 153, 40, 0.12); color: #db9928; }
+        .echo-grade-good { background: rgba(67, 181, 105, 0.12); color: #43b569; }
+        .echo-grade-easy { background: var(--interactive-accent); color: var(--text-on-accent); border-color: transparent; }
+        .echo-grade:hover { filter: brightness(1.08); }
+
+        .echo-type-panel { flex-shrink: 0; margin-top: 12px; padding: 14px; border-radius: 12px; background: var(--background-secondary); border: 1px solid var(--background-modifier-border); }
+        .echo-type-input { width: 100%; min-height: 90px; resize: vertical; border-radius: 8px; border: 1px solid var(--background-modifier-border); background: var(--background-primary); color: var(--text-normal); padding: 10px; font-family: var(--font-text); font-size: 1em; line-height: 1.5; box-sizing: border-box; }
+        .echo-type-bar { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
+        .echo-type-result { margin-top: 12px; }
+        .echo-type-summary { font-weight: 700; font-size: 1.1em; margin-bottom: 8px; }
+        .echo-score-high { color: #43b569; }
+        .echo-score-mid { color: #db9928; }
+        .echo-score-low { color: #df4c4c; }
+        .echo-type-detail { line-height: 1.7; }
+        .echo-word-hit { color: var(--text-muted); }
+        .echo-word-miss { color: var(--text-error); background: rgba(223, 76, 76, 0.12); border-radius: 4px; padding: 0 3px; }
+
+        .echo-leech-pill { margin-left: 8px; font-size: 0.75em; font-weight: 600; color: #df4c4c; background: rgba(223, 76, 76, 0.12); border-radius: 10px; padding: 1px 7px; white-space: nowrap; cursor: help; }
+
+        .echo-heatmap-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px; flex-wrap: wrap; gap: 6px; }
+        .echo-heatmap-title { font-size: 0.9em; text-transform: uppercase; letter-spacing: 1px; color: var(--text-muted); font-weight:bold;}
+        .echo-heatmap-sub { font-size: 0.8em; color: var(--text-faint); }
+        .echo-heatmap-grid { display: flex; gap: 3px; overflow-x: auto; }
+        .echo-heatmap-col { display: flex; flex-direction: column; gap: 3px; }
+        .echo-heatmap-cell { width: 12px; height: 12px; border-radius: 3px; background: var(--background-modifier-border); }
+        .echo-hm-0 { background: var(--background-modifier-border); }
+        .echo-hm-1 { background: rgba(67, 181, 105, 0.35); }
+        .echo-hm-2 { background: rgba(67, 181, 105, 0.55); }
+        .echo-hm-3 { background: rgba(67, 181, 105, 0.75); }
+        .echo-hm-4 { background: rgba(67, 181, 105, 1); }
+        .echo-hm-future { opacity: 0.25; }
+
+        @media (max-width: 800px) {
+            .echo-analytics-wrapper { flex-direction: column; border-right: none; }
+            .echo-heatmap-wrapper, .echo-stats-wrapper { border-right: none; border-bottom: 1px solid var(--background-modifier-border); padding-right: 0; padding-bottom: 20px; }
+        }
+
         @media (max-width: 600px) {
-            .echo-view-container { padding: 10px; position: relative; }
-            .echo-dash-header { flex-direction: column; gap: 15px; align-items: flex-start; }
+            .echo-dash-header { flex-direction: column; gap: 20px; align-items: flex-start; }
+            .echo-bottom-section { flex-direction: column; gap: 15px; }
+            .echo-bottom-directive-text { padding: 0; }
             .echo-table-wrapper { font-size: 0.9em; }
-            
-            .echo-session-header { margin-bottom: 8px; }
-            .echo-session-header h2 { font-size: 1.1em; }
-            .echo-top-directive { padding: 8px; min-height: auto; margin-bottom: 10px; font-size: 0.95em; }
-            
-            /* Give extra scroll room so the last line doesn't hide behind floating buttons */
-            .echo-markdown-content { padding: 15px; padding-bottom: 110px; font-size: 1em; }
-            
-            /* Floating Invisible Bottom Bar */
-            .echo-bottom-section {
-                position: absolute;
-                bottom: calc(75px + env(safe-area-inset-bottom, 20px));
-                left: 15px;
-                right: 15px;
-                flex-direction: row;
-                padding: 0;
-                margin: 0;
-                background: transparent !important;
-                border: none !important;
-                box-shadow: none !important;
-                pointer-events: none; /* Lets you click text in the empty space between buttons */
-                justify-content: space-between;
-                z-index: 100;
-            }
-            .echo-bottom-directive-text { display: none; }
-            .echo-controls-right { display: flex; }
-            
-            /* Modern Hovering Pill Styling */
-            .echo-btn-nav {
-                pointer-events: auto; /* Makes the buttons clickable again */
-                padding: 12px 24px;
-                font-size: 0.95em;
-                border-radius: 30px;
-                box-shadow: 0 4px 15px rgba(0,0,0,0.35) !important;
-                min-width: auto;
-                font-weight: 600;
-            }
-            /* Opaque backgrounds for the floating buttons */
-            .echo-btn-secondary.echo-btn-nav, .echo-btn-active.echo-btn-nav {
-                background: var(--background-primary) !important;
-                border: 1px solid var(--background-modifier-border) !important;
-                color: var(--text-normal) !important;
-            }
-            .echo-btn-primary.echo-btn-nav {
-                background: var(--interactive-accent) !important;
-                color: var(--text-on-accent) !important;
-            }
+            .echo-markdown-content { padding: 15px; }
         }
         `;
         const style = document.createElement('style');
@@ -963,6 +1434,84 @@ class EchoRecallSettingsTab extends PluginSettingTab {
         containerEl.createEl('h2', { text: 'Echo Recall Settings' });
         containerEl.createEl('p', { text: 'Configure which elements should be bypassed by the text masking engine.', cls: 'setting-item-description' });
         containerEl.createEl('br');
+
+        new Setting(containerEl)
+            .setName("Scheduling mode")
+            .setDesc("Confidence: original fixed 1/7/14-day intervals from the confidence dropdown. "
+                + "Adaptive (SM-2): grade your recall at the end of each session and let the interval "
+                + "adapt to how well you remembered. Deadlines still shorten the wait in both modes.")
+            .addDropdown(drop => drop
+                .addOption('confidence', 'Confidence (fixed intervals)')
+                .addOption('sm2', 'Adaptive (SM-2)')
+                .setValue(this.plugin.settings.schedulingMode)
+                .onChange(async (val) => {
+                    this.plugin.settings.schedulingMode = val as 'confidence' | 'sm2';
+                    await this.plugin.saveSettings();
+                    this.display(); // re-render to show/hide the simplify grades toggle
+                }));
+
+        if (this.plugin.settings.schedulingMode === 'sm2') {
+            new Setting(containerEl)
+                .setName("Simplify SM-2 grades")
+                .setDesc("Show only 'Good' (Pass) and 'Again' (Fail) buttons to decrease micro-decisions during study.")
+                .addToggle(toggle => toggle
+                    .setValue(this.plugin.settings.sm2SimplifyGrades)
+                    .onChange(async (val) => {
+                        this.plugin.settings.sm2SimplifyGrades = val;
+                        await this.plugin.saveSettings();
+                    }));
+        }
+
+        new Setting(containerEl)
+            .setName("Cueing mode")
+            .setDesc("How masked words appear. Blank: full underscores (original). First letter: keep "
+                + "the first letter as a hint (w____). Graduated: show the first letter on the lighter "
+                + "masking step, then withdraw it to full blanks on the heavy step.")
+            .addDropdown(drop => drop
+                .addOption('blank', 'Blank (____)')
+                .addOption('first-letter', 'First letter (w___)')
+                .addOption('graduated', 'Graduated (withdraw the cue)')
+                .setValue(this.plugin.settings.cueMode)
+                .onChange(async (val) => {
+                    this.plugin.settings.cueMode = val as 'blank' | 'first-letter' | 'graduated';
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(containerEl)
+            .setName("Enable typed recall")
+            .setDesc("Adds a '⌨ Type' button in a session to type the passage from memory and score it "
+                + "against the note (word-level accuracy).")
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.enableTypedRecall)
+                .onChange(async (val) => {
+                    this.plugin.settings.enableTypedRecall = val;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(containerEl)
+            .setName("Chunking")
+            .setDesc("Break a long note into smaller pieces and drill one at a time, then move on. "
+                + "Paragraph: split on blank lines (safely maintains Header context). Sentence: split on sentence endings. Off: review the whole note at once.")
+            .addDropdown(drop => drop
+                .addOption('off', 'Off (whole note)')
+                .addOption('paragraph', 'By paragraph')
+                .addOption('sentence', 'By sentence')
+                .setValue(this.plugin.settings.chunkMode)
+                .onChange(async (val) => {
+                    this.plugin.settings.chunkMode = val as 'off' | 'paragraph' | 'sentence';
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(containerEl)
+            .setName("Interleave due notes")
+            .setDesc("When starting your due notes, mix them across their echo tags so consecutive "
+                + "notes cover different topics (interleaving improves retention over blocked practice).")
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.interleaveDueQueue)
+                .onChange(async (val) => {
+                    this.plugin.settings.interleaveDueQueue = val;
+                    await this.plugin.saveSettings();
+                }));
 
         new Setting(containerEl)
             .setName("Enable Quick-Look and Cheating Mode")
