@@ -33,6 +33,8 @@ For scheduling, this plugin uses spaced repetition. It also uses a "retrospectiv
 
 ## 2. New Updates (Echo Recall 2.0.0)
 
+![DEMO](https://github.com/user-attachments/assets/a4b67365-b789-446c-afc6-54b361f5cb74)
+
 ### A. Anki Export & Differential Sync
 Do you love Obsidian for notes but prefer Anki for scheduling? Echo Recall now acts as a bridge. Obsidian remains your source of truth, and Anki becomes your revision app. *(Requires the AnkiConnect add-on).*
 
