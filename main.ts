@@ -1,6 +1,6 @@
 import {
     App, Plugin, PluginSettingTab, Setting, ItemView, WorkspaceLeaf, Notice,
-    TFile, MarkdownRenderer, setIcon, MarkdownView, Modal
+    TFile, MarkdownRenderer, setIcon, MarkdownView, Modal, Component
 } from 'obsidian';
 
 const ECHO_DASHBOARD_VIEW_TYPE = 'echo-dashboard-view';
@@ -18,9 +18,15 @@ interface EchoRecallSettings {
     schedulingMode: 'confidence' | 'sm2';
     cueMode: 'blank' | 'first-letter' | 'graduated';
     enableTypedRecall: boolean;
-    chunkMode: 'off' | 'paragraph' | 'sentence';
+    chunkMode: 'off' | 'hierarchical' | 'paragraph' | 'sentence';
     interleaveDueQueue: boolean;
-    sm2SimplifyGrades: boolean; // Feature 5: Simplify grades
+    sm2SimplifyGrades: boolean; 
+    enableEchoButton: boolean;
+
+    enableHeavyRecallMode: boolean;
+    heavyRecallStep3: boolean;
+    ankiDeckName: string;
+    ankiTags: string;
 }
 
 const DEFAULT_SETTINGS: EchoRecallSettings = {
@@ -35,9 +41,14 @@ const DEFAULT_SETTINGS: EchoRecallSettings = {
     schedulingMode: 'confidence',
     cueMode: 'blank',
     enableTypedRecall: false,
-    chunkMode: 'off',
+    chunkMode: 'hierarchical', 
     interleaveDueQueue: false,
-    sm2SimplifyGrades: false
+    sm2SimplifyGrades: false,
+    enableEchoButton: true,
+    enableHeavyRecallMode: false,
+    heavyRecallStep3: false,
+    ankiDeckName: 'Default',
+    ankiTags: 'obsidian'
 };
 
 const LEECH_REVISIONS = 8;
@@ -55,7 +66,7 @@ interface EchoFrontmatter {
     echo_ease?: number;      
     echo_interval?: number;  
     echo_reps?: number;      
-    echo_past_grades?: string[]; // Feature 4: Store history
+    echo_past_grades?: string[]; 
 }
 
 interface DashboardNoteData {
@@ -73,6 +84,32 @@ interface DashboardNoteData {
     archived: boolean;
     isLeech: boolean;
     pastGrades: string[];
+}
+
+interface ChunkData {
+    id: string;
+    headingText: string;
+    immediateHeading: string;
+    content: string;
+    fullText: string;
+}
+
+// --- UTILITIES ---
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+    let binary = '';
+    const bytes = new Uint8Array(buffer);
+    const len = bytes.byteLength;
+    for (let i = 0; i < len; i++) {
+        binary += String.fromCharCode(bytes[i]);
+    }
+    return window.btoa(binary);
+}
+
+function stringToHash(str: string): string {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) hash = (hash << 5) - hash + str.charCodeAt(i);
+    return Math.abs(hash).toString(36);
 }
 
 function interleaveByTag(data: DashboardNoteData[]): TFile[] {
@@ -147,19 +184,7 @@ function seedEaseFromConfidence(confidence?: string): number {
 
 async function updateNoteFrontmatter(app: App, file: TFile, updates: Partial<EchoFrontmatter>) {
     await app.fileManager.processFrontMatter(file, (fm) => {
-        if (updates.echo_date_added !== undefined) fm['echo_date_added'] = updates.echo_date_added;
-        if (updates.echo_last_revised !== undefined) fm['echo_last_revised'] = updates.echo_last_revised;
-        if (updates.echo_revision_count !== undefined) fm['echo_revision_count'] = updates.echo_revision_count;
-        if (updates.echo_confidence !== undefined) fm['echo_confidence'] = updates.echo_confidence;
-        if (updates.echo_next_due !== undefined) fm['echo_next_due'] = updates.echo_next_due;
-        if (updates.echo_tags !== undefined) fm['echo_tags'] = updates.echo_tags;
-        if (updates.echo_deadline !== undefined) fm['echo_deadline'] = updates.echo_deadline;
-        if (updates.echo_history !== undefined) fm['echo_history'] = updates.echo_history;
-        if (updates.echo_archived !== undefined) fm['echo_archived'] = updates.echo_archived;
-        if (updates.echo_ease !== undefined) fm['echo_ease'] = updates.echo_ease;
-        if (updates.echo_interval !== undefined) fm['echo_interval'] = updates.echo_interval;
-        if (updates.echo_reps !== undefined) fm['echo_reps'] = updates.echo_reps;
-        if (updates.echo_past_grades !== undefined) fm['echo_past_grades'] = updates.echo_past_grades;
+        Object.assign(fm, updates);
     });
 }
 
@@ -217,56 +242,283 @@ function scoreRecall(reference: string, typed: string):
     return { correct: dp[n][m], total: n, refWords, matchedRef };
 }
 
-// Feature 1: Context-Aware Paragraph Chunking
-function splitChunks(body: string, mode: 'paragraph' | 'sentence'): string[] {
-    const text = body.trim();
-    if (!text) return [body];
-    
-    if (mode === 'sentence') {
-        const parts = text.split(/(?<=[.!?]["'”’)\]]?)\s+(?=["'“‘([]?[A-Z0-9])/);
-        const chunks = parts.map(s => s.trim()).filter(Boolean);
-        return chunks.length ? chunks : [body];
+// --- FEATURE 1: CONTEXT-AWARE HIERARCHICAL CHUNKING ---
+
+function generateChunks(text: string, mode: string): ChunkData[] {
+    const textTrimmed = text.trim();
+    if (!textTrimmed) return [{ id: '0', headingText: '', immediateHeading: '', content: '', fullText: '' }];
+
+    if (mode === 'sentence' || mode === 'off') {
+        if (mode === 'off') {
+            return [{ id: '0', headingText: '', immediateHeading: '', content: textTrimmed, fullText: textTrimmed }];
+        } else {
+            const parts = textTrimmed.split(/(?<=[.!?]["'”’)\]]?)\s+(?=["'“‘([]?[A-Z0-9])/);
+            const chunks = parts.map(s => s.trim()).filter(Boolean);
+            return chunks.length 
+                ? chunks.map((c, i) => ({ id: `s_${i}`, headingText: '', immediateHeading: '', content: c, fullText: c })) 
+                : [{ id: '0', headingText: '', immediateHeading: '', content: textTrimmed, fullText: textTrimmed }];
+        }
     }
-    
-    // Paragraph mode with context preservation
-    const rawParagraphs = text.split(/\n\s*\n+/);
-    const chunks: string[] = [];
+
+    if (mode === 'paragraph') {
+        const rawParagraphs = textTrimmed.split(/\n\s*\n+/);
+        const chunks = rawParagraphs.map(p => p.trim()).filter(Boolean);
+        return chunks.length 
+            ? chunks.map((c, i) => ({ id: `p_${i}`, headingText: '', immediateHeading: '', content: c, fullText: c })) 
+            : [{ id: '0', headingText: '', immediateHeading: '', content: textTrimmed, fullText: textTrimmed }];
+    }
+
+    // Hierarchical Mode
+    const lines = textTrimmed.split('\n');
+    const chunks: ChunkData[] = [];
     const currentHeadings: { level: number, text: string }[] = [];
+    let currentContent: string[] = [];
+    let chunkCounter = 0;
 
-    for (let i = 0; i < rawParagraphs.length; i++) {
-        const p = rawParagraphs[i].trim();
-        if (!p) continue;
+    const flush = () => {
+        const contentStr = currentContent.join('\n').trim();
+        if (contentStr) {
+            const headingText = currentHeadings.map(h => h.text).join('\n');
+            const immediateHeading = currentHeadings.length > 0 ? currentHeadings[currentHeadings.length - 1].text.replace(/^#+\s/, '').replace(/\*/g,'').trim() : '';
+            chunks.push({
+                id: `chunk_${chunkCounter++}`,
+                headingText: headingText,
+                immediateHeading: immediateHeading,
+                content: contentStr,
+                fullText: (headingText ? headingText + '\n\n' : '') + contentStr
+            });
+        }
+        currentContent = [];
+    };
 
-        const lines = p.split('\n');
-        let allHeadings = true;
-        for (const line of lines) {
-            if (!line.match(/^#{1,6}\s/)) {
-                allHeadings = false;
-                break;
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const hMatch = line.match(/^(#{1,6})\s+(.*)/);
+        if (hMatch) {
+            flush();
+            const level = hMatch[1].length;
+            while (currentHeadings.length > 0 && currentHeadings[currentHeadings.length - 1].level >= level) {
+                currentHeadings.pop();
             }
+            currentHeadings.push({ level, text: line });
+        } else {
+            currentContent.push(line);
         }
-
-        for (const line of lines) {
-            const m = line.match(/^(#{1,6})\s+(.*)/);
-            if (m) {
-                const level = m[1].length;
-                while (currentHeadings.length > 0 && currentHeadings[currentHeadings.length - 1].level >= level) {
-                    currentHeadings.pop();
-                }
-                currentHeadings.push({ level, text: line });
-            }
-        }
-
-        if (allHeadings) continue;
-
-        let contextStr = "";
-        for (const h of currentHeadings) {
-            if (!p.includes(h.text)) contextStr += h.text + "\n\n";
-        }
-        chunks.push((contextStr + p).trim());
     }
-    return chunks.length ? chunks : [body];
+    flush();
+
+    return chunks.length ? chunks : [{ id: '0', headingText: '', immediateHeading: '', content: textTrimmed, fullText: textTrimmed }];
 }
+
+// --- ANKI CONNECT INTEGRATION ---
+
+async function ankiRequest(action: string, params: any = {}) {
+    try {
+        const response = await fetch('http://127.0.0.1:8765', {
+            method: 'POST',
+            body: JSON.stringify({ action, version: 6, params })
+        });
+        const result = await response.json();
+        if (result.error) throw new Error(result.error);
+        return result.result;
+    } catch (e) {
+        console.error('AnkiConnect Error:', e);
+        throw e;
+    }
+}
+
+async function setupAnkiNoteType() {
+    const modelName = 'EchoRecall_v8';
+    try {
+        const models = await ankiRequest('modelNames');
+        if (!models.includes(modelName)) {
+            await ankiRequest('createModel', {
+                modelName,
+                inOrderFields: ['ChunkID', 'NoteTitle', 'HeadingPath', 'ImmediateHeading', 'Content', 'FullNote', 'ObsidianURI', '_WARNING'],
+                css: `
+                    :root {
+                        --bg-color: #262831;
+                        --text-color: #c9cdd2;
+                        --heading-color: #d07353;
+                        --accent-color: #43b569;
+                        --border-color: #3b3e48;
+                        --mark-bg: rgba(219, 153, 40, 0.35);
+                        --modal-bg: #1e1e24;
+                        --bold-color: #d07353;
+                    }
+                    @media (prefers-color-scheme: light) {
+                        :root {
+                            --bg-color: #f4ecd8;
+                            --text-color: #3d3d3d;
+                            --heading-color: #cf6a4c;
+                            --accent-color: #43b569;
+                            --border-color: #dcd3bd;
+                            --mark-bg: rgba(219, 153, 40, 0.25);
+                            --modal-bg: #fdfaf3;
+                            --bold-color: #cf6a4c;
+                        }
+                    }
+
+                    html, body { margin: 0; padding: 0; height: auto; min-height: 100vh; background: var(--bg-color); color: var(--text-color); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; overflow-x: hidden; }
+                    .card { text-align: left; background: var(--bg-color); color: var(--text-color); margin: 0; padding: 0; outline: none; }
+                    
+                    .echo-anki-container { display: flex; flex-direction: row; min-height: 100vh; width: 100%; box-sizing: border-box; outline: none; }
+                    
+                    /* Sidebar Layout */
+                    .echo-anki-sidebar { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; flex: 1; min-width: 250px; max-width: 300px; border-right: 1px solid var(--border-color); padding: 20px; box-sizing: border-box; background: rgba(0,0,0,0.05); }
+                    .echo-sidebar-title { font-weight: bold; font-size: 1.15em; color: var(--accent-color); margin-bottom: 15px; padding-bottom: 15px; border-bottom: 1px solid var(--border-color); }
+                    .echo-anki-toc { flex-grow: 1; overflow-y: auto; font-size: 0.9em; color: inherit; line-height: 1.6; margin-bottom: 15px; padding-right: 5px; opacity: 0.85; }
+                    
+                    .echo-anki-content { flex: 3; padding: 35px 50px; line-height: 1.6; font-size: 1.05em; overflow: visible; box-sizing: border-box; min-width: 0; }
+                    
+                    /* Enhanced Button */
+                    .echo-btn-eye { background: var(--bg-color); color: var(--text-color); border: 1px solid var(--border-color); padding: 10px 14px; border-radius: 8px; cursor: pointer; width: 100%; font-weight: 600; font-size: 0.9em; transition: all 0.2s ease; flex-shrink: 0; display: flex; justify-content: center; align-items: center; gap: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); box-sizing: border-box; margin-bottom: 15px; }
+                    .echo-btn-eye:hover { background: var(--border-color); color: var(--text-color); }
+                    
+                    .echo-blanked { padding: 40px; border: 2px dashed var(--border-color); text-align: center; opacity: 0.6; margin-top: 15px; font-style: italic; border-radius: 12px; clear: both; }
+                    
+                    /* Modal */
+                    .echo-full-note { display: none; position: fixed; top: 3%; left: 3%; width: 94%; height: 94%; background: var(--modal-bg); color: var(--text-color); z-index: 1000; overflow-y: auto; padding: 40px; border: 1px solid var(--border-color); box-shadow: 0 10px 40px rgba(0,0,0,0.3); border-radius: 16px; box-sizing: border-box; }
+                    .echo-modal-close { position: fixed; top: 5%; right: 5%; width: auto; background: var(--border-color); padding: 8px 16px; z-index: 1001; }
+                    
+                    /* Rich Markdown Styling based on Obsidian Theme */
+                    h1, h2, h3, h4, h5, h6 { color: var(--heading-color); font-weight: 600; margin-top: 1.5em; margin-bottom: 0.5em; }
+                    .echo-anki-content h2.immediate-heading { color: var(--accent-color); text-align: center; margin-top: 0; margin-bottom: 25px; font-size: 1.6em; border-bottom: 1px solid var(--border-color); padding-bottom: 15px; }
+                    
+                    strong { color: var(--bold-color); font-weight: 600; }
+                    em, i { color: var(--accent-color); }
+                    hr { border: none; border-top: 1px solid var(--border-color); margin: 25px 0; }
+                    table { border-collapse: collapse; width: 100%; margin: 15px 0; background: rgba(0,0,0,0.02); }
+                    th, td { border: 1px solid var(--border-color); padding: 10px; }
+                    th { font-weight: bold; color: var(--accent-color); }
+                    blockquote { border-left: 4px solid var(--accent-color); margin: 15px 0; opacity: 0.9; background: rgba(0,0,0,0.03); padding: 10px 15px; border-radius: 0 6px 6px 0; }
+                    img { max-width: 100%; height: auto; border-radius: 8px; display: block; margin: 15px 0; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+                    mark { background: var(--mark-bg); color: inherit; padding: 2px 4px; border-radius: 4px; }
+                    u { text-decoration-color: var(--accent-color); text-underline-offset: 3px; text-decoration-thickness: 2px; }
+                    code { background: rgba(0,0,0,0.1); padding: 2px 6px; border-radius: 4px; font-family: Consolas, monospace; font-size: 0.9em; }
+                    pre { background: rgba(0,0,0,0.1); padding: 15px; border-radius: 8px; overflow-x: auto; border: 1px solid var(--border-color); margin: 15px 0; }
+                    pre code { background: transparent; padding: 0; color: inherit; border-radius: 0; }
+                    
+                    /* Bullet Indent Lines Removed */
+                    ul { list-style-type: disc; padding-left: 20px; margin: 5px 0; }
+                    ul ul { padding-left: 20px; list-style-type: circle; }
+                    li { margin-bottom: 6px; }
+                    li::marker { color: var(--accent-color); }
+                    
+                    mjx-container { overflow-x: auto; max-width: 100%; display: inline-block; vertical-align: middle; }
+                    .echo-obsidian-link { display: inline-block; margin-top: 30px; color: var(--heading-color); text-decoration: none; font-weight: bold; font-size: 0.9em; }
+                    
+                    @media (max-width: 768px) {
+                        .echo-anki-container { flex-direction: column; }
+                        .echo-anki-sidebar { position: static; height: auto; max-height: 250px; border-right: none; border-bottom: 1px solid var(--border-color); width: 100%; max-width: none; }
+                        .echo-anki-content { padding: 20px; }
+                        .echo-full-note { width: 100%; height: 100%; top: 0; left: 0; border-radius: 0; padding: 20px; }
+                        .echo-modal-close { top: 15px; right: 15px; }
+                    }
+                `,
+                isCloze: false,
+                cardTemplates: [
+                    {
+                        Name: 'Echo Recall Card',
+                        Front: `
+                            <div class="echo-anki-container" tabindex="0" id="main-container">
+                                <div class="echo-anki-sidebar">
+                                    <div class="echo-sidebar-title">{{NoteTitle}}</div>
+                                    <button class="echo-btn-eye" onclick="document.getElementById('fn').style.display='block'">👁 View Full Note</button>
+                                    <div class="echo-anki-toc">{{HeadingPath}}</div>
+                                </div>
+                                <div class="echo-anki-content">
+                                    {{#ImmediateHeading}}<h2 class="immediate-heading">{{ImmediateHeading}}</h2>{{/ImmediateHeading}}
+                                    <div class="echo-blanked">[ Content Hidden - Brainstorm / Recall Now! ]</div>
+                                </div>
+                            </div>
+                            <div id="fn" class="echo-full-note">
+                                <button class="echo-btn-eye echo-modal-close" onclick="document.getElementById('fn').style.display='none'">Close</button>
+                                {{FullNote}}
+                            </div>
+                            <script>
+                                setTimeout(function() { document.body.focus(); }, 50); // Fixes down-arrow scroll
+                                window.addEventListener('keydown', function(e) {
+                                    var fn = document.getElementById('fn');
+                                    if (!fn) return;
+                                    if (e.key === 'Escape' && fn.style.display === 'block') {
+                                        fn.style.display = 'none';
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                    }
+                                }, true);
+                            </script>
+                        `,
+                        Back: `
+                            <div class="echo-anki-container" tabindex="0" id="main-container">
+                                <div class="echo-anki-sidebar">
+                                    <div class="echo-sidebar-title">{{NoteTitle}}</div>
+                                    <button class="echo-btn-eye" onclick="document.getElementById('fn').style.display='block'">👁 View Full Note</button>
+                                    <div class="echo-anki-toc">{{HeadingPath}}</div>
+                                </div>
+                                <div class="echo-anki-content">
+                                    {{#ImmediateHeading}}<h2 class="immediate-heading">{{ImmediateHeading}}</h2>{{/ImmediateHeading}}
+                                    <div>{{Content}}</div>
+                                    <a class="echo-obsidian-link" href="{{ObsidianURI}}">▶ Open in Obsidian</a>
+                                </div>
+                            </div>
+                            <div id="fn" class="echo-full-note">
+                                <button class="echo-btn-eye echo-modal-close" onclick="document.getElementById('fn').style.display='none'">Close</button>
+                                {{FullNote}}
+                            </div>
+                            <script>
+                                setTimeout(function() { document.body.focus(); }, 50); // Fixes down-arrow scroll
+                                window.addEventListener('keydown', function(e) {
+                                    var fn = document.getElementById('fn');
+                                    if (!fn) return;
+                                    if (e.key === 'Escape' && fn.style.display === 'block') {
+                                        fn.style.display = 'none';
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                    }
+                                }, true);
+                            </script>
+                        `
+                    }
+                ]
+            });
+        }
+    } catch (e) {
+        console.warn("AnkiConnect not detected or failed to set up Note Type.");
+    }
+}
+
+async function processHtmlMedia(app: App, file: TFile, component: Component, markdown: string, ankiSync: boolean = false): Promise<string> {
+    let processed = markdown;
+    const wikiRegex = /!\[\[([^\]|]+)(?:\|[^\]]*)?\]\]/g;
+    const mdRegex = /!\[.*?\]\(([^)]+)\)/g;
+
+    const replaceMedia = async (match: string, filename: string) => {
+        const destFile = app.metadataCache.getFirstLinkpathDest(decodeURIComponent(filename), file.path);
+        if (destFile instanceof TFile && ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'mp3', 'mp4'].includes(destFile.extension)) {
+            if (ankiSync) {
+                const arr = await app.vault.readBinary(destFile);
+                const b64 = arrayBufferToBase64(arr);
+                const ankiFilename = `echo_${stringToHash(destFile.path)}_${destFile.name}`;
+                await ankiRequest('storeMediaFile', { filename: ankiFilename, data: b64 });
+                return `<img src="${ankiFilename}">`;
+            }
+        }
+        return match;
+    };
+
+    const wikiMatches = [...processed.matchAll(wikiRegex)];
+    for (const m of wikiMatches) { processed = processed.replace(m[0], await replaceMedia(m[0], m[1])); }
+    const mdMatches = [...processed.matchAll(mdRegex)];
+    for (const m of mdMatches) { processed = processed.replace(m[0], await replaceMedia(m[0], m[1])); }
+
+    const div = document.createElement('div');
+    await MarkdownRenderer.render(app, processed, div, file.path, component);
+    return div.innerHTML;
+}
+
+
+// --- VIEWS ---
 
 class RevisionItemView extends ItemView {
     queue: TFile[] = [];
@@ -278,14 +530,14 @@ class RevisionItemView extends ItemView {
     originalTexts: WeakMap<HTMLElement | Text, string> = new WeakMap();
     isDomWrapped: boolean = false;
 
-    chunks: string[] = [];       
+    chunks: ChunkData[] = [];       
     currentChunk: number = 0;
     originalFullBody: string = "";
     file: TFile;
 
     headerTitle: HTMLElement;
     headerCount: HTMLElement;
-    peekBtn: HTMLElement; // Feature 2
+    peekBtn: HTMLElement;
     topDirective: HTMLElement;
     mdContainer: HTMLElement;
     bottomSection: HTMLElement;
@@ -359,11 +611,26 @@ class RevisionItemView extends ItemView {
         
         this.btnBack = this.bottomSection.createEl('button', { text: 'Back', cls: 'echo-btn echo-btn-secondary echo-btn-nav' });
         this.btnBack.onclick = () => {
-            if (this.currentStep > 1) { this.currentStep--; this.updateStepUI(); }
+            if (this.plugin.settings.enableHeavyRecallMode) {
+                if (this.currentStep === 3) {
+                    this.currentStep = 2;
+                    this.currentChunk = this.chunks.length - 1;
+                    this.updateStepUI();
+                } else if (this.currentStep === 2) {
+                    if (this.currentChunk > 0) {
+                        this.currentChunk--;
+                        this.updateStepUI();
+                    } else {
+                        this.currentStep = 1;
+                        this.updateStepUI();
+                    }
+                }
+            } else {
+                if (this.currentStep > 1) { this.currentStep--; this.updateStepUI(); }
+            }
         };
 
         this.bottomDirectiveText = this.bottomSection.createDiv('echo-bottom-directive-text');
-
         const rightControls = this.bottomSection.createDiv('echo-controls-right');
 
         this.btnType = rightControls.createEl('button', { text: '⌨ Type', cls: 'echo-btn echo-btn-nav echo-btn-secondary' });
@@ -371,7 +638,25 @@ class RevisionItemView extends ItemView {
 
         this.btnNext = rightControls.createEl('button', { text: 'Next', cls: 'echo-btn echo-btn-nav echo-btn-active' });
         this.btnNext.onclick = () => { 
-            if (this.currentStep < 3) { this.currentStep++; this.updateStepUI(); }
+            if (this.plugin.settings.enableHeavyRecallMode) {
+                if (this.currentStep === 1) {
+                    this.currentStep = 2;
+                    this.currentChunk = 0;
+                    this.updateStepUI();
+                } else if (this.currentStep === 2) {
+                    if (this.currentChunk < this.chunks.length - 1) {
+                        this.currentChunk++;
+                        this.updateStepUI();
+                    } else {
+                        if (this.plugin.settings.heavyRecallStep3) {
+                            this.currentStep = 3;
+                            this.updateStepUI();
+                        }
+                    }
+                }
+            } else {
+                if (this.currentStep < 3) { this.currentStep++; this.updateStepUI(); }
+            }
         };
 
         this.btnFinish = rightControls.createEl('button', { text: 'Finish & Log', cls: 'echo-btn echo-btn-primary echo-btn-nav' });
@@ -392,8 +677,7 @@ class RevisionItemView extends ItemView {
         const { body } = extractFrontmatter(rawText);
         this.originalFullBody = body;
 
-        const mode = this.plugin.settings.chunkMode;
-        this.chunks = mode === 'off' ? [body] : splitChunks(body, mode);
+        this.chunks = generateChunks(body, this.plugin.settings.chunkMode);
         this.currentChunk = 0;
 
         await this.renderCurrentChunk();
@@ -410,15 +694,7 @@ class RevisionItemView extends ItemView {
         this.typeInput.value = '';
         this.typeResult.empty();
 
-        const total = this.chunks.length;
-        this.headerCount.textContent = total > 1
-            ? `Note ${this.currentIndex + 1}/${this.queue.length} · chunk ${this.currentChunk + 1}/${total}`
-            : `Note ${this.currentIndex + 1} of ${this.queue.length}`;
-
-        this.mdContainer.empty();
-        await MarkdownRenderer.render(this.app, this.chunks[this.currentChunk], this.mdContainer, this.file.path, this);
-
-        this.updateStepUI();
+        await this.updateStepUI();
     }
 
     async advanceOrFinish() {
@@ -439,68 +715,162 @@ class RevisionItemView extends ItemView {
         modal.open();
     }
 
-    updateStepUI() {
+    async updateStepUI() {
         const sm2Mode = this.plugin.settings.schedulingMode === 'sm2';
-        
-        this.peekBtn.style.display = this.currentStep === 3 ? 'none' : 'flex';
+        const heavyMode = this.plugin.settings.enableHeavyRecallMode;
+        const total = this.chunks.length;
+        let maxSteps = heavyMode && !this.plugin.settings.heavyRecallStep3 ? 2 : 3;
 
-        if (this.currentStep === 1) {
-            this.topDirective.innerHTML = "<span>Firstly, <strong style='color: var(--text-error)'>say it</strong> at least a few times.</span>";
-            this.bottomDirectiveText.innerHTML = "It's best to repeat this step until you know the flow of the text.";
-            this.btnBack.disabled = true;
-            this.btnBack.style.opacity = '0.3';
-            this.btnNext.style.display = 'block';
-            this.btnFinish.style.display = 'none';
-            this.gradeBar.style.display = 'none';
-        } else if (this.currentStep === 2) {
-            this.topDirective.innerHTML = "<span>Secondly, <strong style='color: var(--text-error)'>say it without mistakes.</strong></span>";
-            this.bottomDirectiveText.innerHTML = "Make sure you're comfortable with every line of the text.";
-            this.btnBack.disabled = false;
-            this.btnBack.style.opacity = '1';
-            this.btnNext.style.display = 'block';
-            this.btnFinish.style.display = 'none';
-            this.gradeBar.style.display = 'none';
+        if (heavyMode) {
+            this.headerCount.textContent = total > 1
+                ? `Note ${this.currentIndex + 1}/${this.queue.length} · chunk ${this.currentStep === 2 ? (this.currentChunk + 1) : '-'}/${total}`
+                : `Note ${this.currentIndex + 1} of ${this.queue.length}`;
         } else {
-            this.topDirective.innerHTML = "<span>Thirdly, <strong style='color: var(--text-error)'>say it without pausing.</strong></span>";
-            this.btnBack.disabled = false;
-            this.btnBack.style.opacity = '1';
-            this.btnNext.style.display = 'none';
-            const isLastChunk = this.currentChunk >= this.chunks.length - 1;
-            
-            if (!isLastChunk) {
-                this.bottomDirectiveText.innerHTML = "If you're unsure about a word, go back two steps and reread that part.";
-                this.btnFinish.style.display = 'block';
-                this.btnFinish.textContent = "Next chunk";
-                this.gradeBar.style.display = 'none';
-            } else if (sm2Mode) {
-                this.bottomDirectiveText.innerHTML = "How did that go? Grade your recall to schedule the next review.";
-                this.btnFinish.style.display = 'none';
-                this.gradeBar.style.display = 'flex';
-                
-                // Feature 5: Update Grades
-                this.gradeBar.empty();
-                const grades: EchoGrade[] = this.plugin.settings.sm2SimplifyGrades ? ['Again', 'Good'] : ['Again', 'Hard', 'Good', 'Easy'];
-                grades.forEach(g => {
-                    const b = this.gradeBar.createEl('button', {
-                        text: g,
-                        cls: `echo-btn echo-btn-nav echo-grade echo-grade-${g.toLowerCase()}`
-                    });
-                    b.onclick = async () => { await this.logAndNext(SM2_QUALITY[g]); };
-                });
+            this.headerCount.textContent = total > 1
+                ? `Note ${this.currentIndex + 1}/${this.queue.length} · chunk ${this.currentChunk + 1}/${total}`
+                : `Note ${this.currentIndex + 1} of ${this.queue.length}`;
+        }
 
+        this.peekBtn.style.display = (this.currentStep === 3 && !heavyMode) ? 'none' : 'flex';
+
+        if (heavyMode) {
+            if (this.currentStep === 1) {
+                this.topDirective.innerHTML = "<span><strong>Step 1: Skim</strong> - Get a general overview of all topics.</span>";
+                this.bottomDirectiveText.innerHTML = "Read through the entire note to prime your memory.";
+            } else if (this.currentStep === 2) {
+                this.topDirective.innerHTML = "<span><strong>Step 2: Recall</strong> - Chunkwise Brainstorming.</span>";
+                this.bottomDirectiveText.innerHTML = "Recall everything under this heading before checking.";
+            } else if (this.currentStep === 3) {
+                this.topDirective.innerHTML = "<span><strong>Step 3: Final Test</strong> - The entire note is blanked.</span>";
+                this.bottomDirectiveText.innerHTML = "Mentally outline the whole structure.";
+            }
+        } else {
+            if (this.currentStep === 1) {
+                this.topDirective.innerHTML = "<span>Firstly, <strong style='color: var(--text-error)'>say it</strong> at least a few times.</span>";
+                this.bottomDirectiveText.innerHTML = "It's best to repeat this step until you know the flow of the text.";
+            } else if (this.currentStep === 2) {
+                this.topDirective.innerHTML = "<span>Secondly, <strong style='color: var(--text-error)'>say it without mistakes.</strong></span>";
+                this.bottomDirectiveText.innerHTML = "Make sure you're comfortable with every line of the text.";
             } else {
+                this.topDirective.innerHTML = "<span>Thirdly, <strong style='color: var(--text-error)'>say it without pausing.</strong></span>";
                 this.bottomDirectiveText.innerHTML = "If you're unsure about a word, go back two steps and reread that part.";
-                this.btnFinish.style.display = 'block';
+            }
+        }
+
+        const isLastChunk = this.currentChunk >= this.chunks.length - 1;
+
+        if (heavyMode) {
+            this.btnBack.disabled = (this.currentStep === 1);
+            this.btnBack.style.opacity = (this.currentStep === 1) ? '0.3' : '1';
+
+            if (this.currentStep === 1) {
+                this.btnNext.style.display = 'block';
+                this.btnFinish.style.display = 'none';
                 this.gradeBar.style.display = 'none';
-                this.btnFinish.textContent = (this.currentIndex < this.queue.length - 1) ? "Finish & Next Note" : "Finish & Log";
+            } else if (this.currentStep === 2) {
+                if (!isLastChunk || maxSteps === 3) {
+                    this.btnNext.style.display = 'block';
+                    this.btnFinish.style.display = 'none';
+                    this.gradeBar.style.display = 'none';
+                } else {
+                    this.btnNext.style.display = 'none';
+                    if (sm2Mode) {
+                        this.btnFinish.style.display = 'none';
+                        this.gradeBar.style.display = 'flex';
+                        this.gradeBar.empty();
+                        const grades: EchoGrade[] = this.plugin.settings.sm2SimplifyGrades ? ['Again', 'Good'] : ['Again', 'Hard', 'Good', 'Easy'];
+                        grades.forEach(g => {
+                            const b = this.gradeBar.createEl('button', { text: g, cls: `echo-btn echo-btn-nav echo-grade echo-grade-${g.toLowerCase()}` });
+                            b.onclick = async () => { await this.logAndNext(SM2_QUALITY[g]); };
+                        });
+                    } else {
+                        this.btnFinish.style.display = 'block';
+                        this.btnFinish.textContent = (this.currentIndex < this.queue.length - 1) ? "Finish & Next Note" : "Finish & Log";
+                        this.gradeBar.style.display = 'none';
+                    }
+                }
+            } else if (this.currentStep === 3) {
+                this.btnNext.style.display = 'none';
+                if (sm2Mode) {
+                    this.btnFinish.style.display = 'none';
+                    this.gradeBar.style.display = 'flex';
+                    this.gradeBar.empty();
+                    const grades: EchoGrade[] = this.plugin.settings.sm2SimplifyGrades ? ['Again', 'Good'] : ['Again', 'Hard', 'Good', 'Easy'];
+                    grades.forEach(g => {
+                        const b = this.gradeBar.createEl('button', { text: g, cls: `echo-btn echo-btn-nav echo-grade echo-grade-${g.toLowerCase()}` });
+                        b.onclick = async () => { await this.logAndNext(SM2_QUALITY[g]); };
+                    });
+                } else {
+                    this.btnFinish.style.display = 'block';
+                    this.btnFinish.textContent = (this.currentIndex < this.queue.length - 1) ? "Finish & Next Note" : "Finish & Log";
+                    this.gradeBar.style.display = 'none';
+                }
+            }
+        } else {
+            this.btnBack.disabled = (this.currentStep === 1);
+            this.btnBack.style.opacity = (this.currentStep === 1) ? '0.3' : '1';
+            this.btnNext.style.display = (this.currentStep < 3) ? 'block' : 'none';
+
+            if (this.currentStep < 3) {
+                this.btnFinish.style.display = 'none';
+                this.gradeBar.style.display = 'none';
+            } else {
+                if (!isLastChunk) {
+                    this.btnFinish.style.display = 'block';
+                    this.btnFinish.textContent = "Next chunk";
+                    this.gradeBar.style.display = 'none';
+                } else if (sm2Mode) {
+                    this.btnFinish.style.display = 'none';
+                    this.gradeBar.style.display = 'flex';
+                    this.gradeBar.empty();
+                    const grades: EchoGrade[] = this.plugin.settings.sm2SimplifyGrades ? ['Again', 'Good'] : ['Again', 'Hard', 'Good', 'Easy'];
+                    grades.forEach(g => {
+                        const b = this.gradeBar.createEl('button', { text: g, cls: `echo-btn echo-btn-nav echo-grade echo-grade-${g.toLowerCase()}` });
+                        b.onclick = async () => { await this.logAndNext(SM2_QUALITY[g]); };
+                    });
+                } else {
+                    this.btnFinish.style.display = 'block';
+                    this.btnFinish.textContent = (this.currentIndex < this.queue.length - 1) ? "Finish & Next Note" : "Finish & Log";
+                    this.gradeBar.style.display = 'none';
+                }
             }
         }
 
         this.btnType.style.display = this.plugin.settings.enableTypedRecall ? 'block' : 'none';
 
-        const exactScroll = this.mdContainer.scrollTop;
-        this.applyMaskToDOM();
-        this.mdContainer.scrollTop = exactScroll;
+        this.mdContainer.empty();
+
+        if (heavyMode) {
+            if (this.currentStep === 1) {
+                await MarkdownRenderer.render(this.app, this.originalFullBody, this.mdContainer, this.file.path, this);
+            } else if (this.currentStep === 2) {
+                const chunk = this.chunks[this.currentChunk];
+                if (chunk.headingText) {
+                    const hWrap = this.mdContainer.createDiv('echo-heavy-headings');
+                    await MarkdownRenderer.render(this.app, chunk.headingText, hWrap, this.file.path, this);
+                }
+                const blankWrap = this.mdContainer.createDiv('echo-heavy-blank');
+                const btn = blankWrap.createEl('button', { text: '👁 Reveal Content', cls: 'echo-btn echo-btn-primary' });
+                const cWrap = blankWrap.createDiv({ cls: 'echo-heavy-content' });
+                cWrap.style.display = 'none';
+                await MarkdownRenderer.render(this.app, chunk.content, cWrap, this.file.path, this);
+                btn.onclick = () => { cWrap.style.display = 'block'; btn.style.display = 'none'; };
+            } else if (this.currentStep === 3) {
+                const blankWrap = this.mdContainer.createDiv('echo-heavy-blank');
+                const btn = blankWrap.createEl('button', { text: '👁 Reveal Full Note', cls: 'echo-btn echo-btn-primary' });
+                const cWrap = blankWrap.createDiv({ cls: 'echo-heavy-content' });
+                cWrap.style.display = 'none';
+                await MarkdownRenderer.render(this.app, this.originalFullBody, cWrap, this.file.path, this);
+                btn.onclick = () => { cWrap.style.display = 'block'; btn.style.display = 'none'; };
+            }
+        } else {
+            this.isDomWrapped = false;
+            this.originalTexts = new WeakMap();
+            await MarkdownRenderer.render(this.app, this.chunks[this.currentChunk].fullText, this.mdContainer, this.file.path, this);
+            const exactScroll = this.mdContainer.scrollTop;
+            this.applyMaskToDOM();
+            this.mdContainer.scrollTop = exactScroll;
+        }
     }
 
     toggleTypePanel() {
@@ -668,7 +1038,6 @@ class RevisionItemView extends ItemView {
             echo_history: history
         };
 
-        // Feature 4: Record past grades
         const gradesArr = Array.isArray(fm?.echo_past_grades) ? fm.echo_past_grades : [];
         if (quality !== undefined) {
             const gradeStr = Object.keys(SM2_QUALITY).find(key => SM2_QUALITY[key as EchoGrade] === quality) || 'Good';
@@ -788,7 +1157,6 @@ class DashboardItemView extends ItemView {
             this.plugin.startRevisionSession(files);
         };
 
-        // Feature 3: Advanced Analytics Panel
         this.renderAnalytics(container, fullData);
 
         let displayData = fullData;
@@ -943,7 +1311,6 @@ class DashboardItemView extends ItemView {
     renderAnalytics(container: HTMLElement, data: DashboardNoteData[]) {
         const analyticsWrap = container.createDiv('echo-analytics-wrapper');
         
-        // 1. Heatmap
         const counts = new Map<string, number>();
         for (const d of data) {
             for (const day of d.history) counts.set(day, (counts.get(day) || 0) + 1);
@@ -982,7 +1349,6 @@ class DashboardItemView extends ItemView {
             head.createSpan({ text: `0 revisions`, cls: 'echo-heatmap-sub' });
         }
 
-        // 2. Stats
         const statsWrap = analyticsWrap.createDiv('echo-stats-wrapper');
         let totalRevs = 0, hard = 0, mod = 0, easy = 0, archived = 0, streak = 0;
         const datesSet = new Set<string>();
@@ -1023,7 +1389,6 @@ class DashboardItemView extends ItemView {
             <div><strong>Avg Daily Reviews:</strong> ${avgDaily}</div>
         `;
 
-        // 3. Future Echoes
         const futureWrap = analyticsWrap.createDiv('echo-future-wrapper');
         futureWrap.createDiv({ text: 'Future Echoes:', cls: 'echo-future-title' });
         
@@ -1103,7 +1468,6 @@ class DashboardItemView extends ItemView {
             await updateNoteFrontmatter(this.app, data.file, { echo_confidence: val });
         };
         
-        // Feature 4: Past Grades visual
         if (this.plugin.settings.schedulingMode === 'sm2' && data.pastGrades.length > 0) {
             const past = data.pastGrades.slice(-3).join(' · ');
             confWrap.createDiv({ text: past, cls: 'echo-past-grades' });
@@ -1157,7 +1521,23 @@ export default class EchoRecallPlugin extends Plugin {
             this.activateDashboard();
         });
 
-        this.app.workspace.onLayoutReady(() => this.injectHeaderButtons());
+        // Feature 3: Anki Export Buttons
+        this.addRibbonIcon('layers', 'Export Note to Anki (Echo Recall)', async () => {
+            const file = this.app.workspace.getActiveFile();
+            if (file) await this.exportNoteToAnki(file);
+            else new Notice('No active note to export.');
+        });
+        
+        this.addRibbonIcon('refresh-cw', 'Update Anki Cards (Echo Recall)', async () => {
+            const file = this.app.workspace.getActiveFile();
+            if (file) await this.updateAnkiCards(file);
+            else new Notice('No active note to update.');
+        });
+
+        this.app.workspace.onLayoutReady(() => {
+            this.injectHeaderButtons();
+            setupAnkiNoteType();
+        });
         this.registerEvent(this.app.workspace.on('layout-change', () => this.injectHeaderButtons()));
         this.registerEvent(this.app.workspace.on('file-open', () => this.injectHeaderButtons()));
 
@@ -1179,6 +1559,159 @@ export default class EchoRecallPlugin extends Plugin {
             name: 'Open Dashboard',
             callback: () => this.activateDashboard()
         });
+
+        this.addCommand({
+            id: 'echo-recall-export-anki', name: 'Export active note to Anki',
+            callback: () => {
+                const f = this.app.workspace.getActiveFile();
+                if (f) this.exportNoteToAnki(f);
+            }
+        });
+
+        this.addCommand({
+            id: 'echo-recall-update-anki', name: 'Differential update Anki cards',
+            callback: () => {
+                const f = this.app.workspace.getActiveFile();
+                if (f) this.updateAnkiCards(f);
+            }
+        });
+    }
+
+    // --- ANKI EXPORT LOGIC ---
+
+    async createDeckIfNeeded() {
+        const deck = this.settings.ankiDeckName;
+        try {
+            const decks = await ankiRequest('deckNames');
+            if (!decks.includes(deck)) await ankiRequest('createDeck', { deck });
+        } catch (e) {
+            new Notice('Failed to connect to AnkiConnect. Is Anki open?');
+            throw e;
+        }
+    }
+
+    async exportNoteToAnki(file: TFile) {
+        new Notice('Exporting to Anki (generating HTML)...');
+        try {
+            await this.createDeckIfNeeded();
+            const rawText = await this.app.vault.read(file);
+            const { body } = extractFrontmatter(rawText);
+            const chunks = generateChunks(body, this.settings.chunkMode);
+            const fullNoteHtml = await processHtmlMedia(this.app, file, this, body, true);
+            const obsidianUri = `obsidian://open?vault=${encodeURIComponent(this.app.vault.getName())}&file=${encodeURIComponent(file.path)}`;
+
+            const fullTocLines: {level: number, text: string, raw: string}[] = [];
+            const rawLines = body.split('\n');
+            for (const l of rawLines) {
+                const m = l.match(/^(#{1,6})\s+(.*)/);
+                if (m) fullTocLines.push({ level: m[1].length, text: m[2].replace(/\*/g,'').trim(), raw: l });
+            }
+
+            const notes = [];
+            for (const chunk of chunks) {
+                const uid = `echo_${stringToHash(file.path)}_${stringToHash(chunk.headingText || chunk.content.substring(0, 50))}`;
+                
+                let localToc = '<ul style="list-style-type:none; padding-left:0; margin:0;">';
+                for (const h of fullTocLines) {
+                    const padding = (h.level - 1) * 15;
+                    const isCurrent = (chunk.immediateHeading === h.text);
+                    localToc += `<li style="margin-left:${padding}px; padding: 4px 0; line-height: 1.4; ${isCurrent ? 'color:#43b569; font-weight:bold;' : 'color:#888;'}">${h.text}</li>`;
+                }
+                localToc += '</ul>';
+
+                notes.push({
+                    deckName: this.settings.ankiDeckName,
+                    modelName: 'EchoRecall_v8',
+                    fields: {
+                        ChunkID: uid,
+                        NoteTitle: file.basename,
+                        HeadingPath: localToc || '<i>Full Note / Paragraph</i>',
+                        ImmediateHeading: chunk.immediateHeading,
+                        Content: await processHtmlMedia(this.app, file, this, chunk.content, true),
+                        FullNote: fullNoteHtml,
+                        ObsidianURI: obsidianUri,
+                        _WARNING: 'DO NOT EDIT IN ANKI. Obsidian is the source of truth.'
+                    },
+                    tags: this.settings.ankiTags.split(',').map(t => t.trim()),
+                    options: { allowDuplicate: false }
+                });
+            }
+
+            const results = await ankiRequest('addNotes', { notes });
+            let added = 0; let skipped = 0;
+            results.forEach((r: any) => r === null ? skipped++ : added++);
+            new Notice(`Anki Export Complete: ${added} added, ${skipped} skipped.`);
+            if (skipped > 0) new Notice("Skipped cards might already exist. Try the Update command.");
+
+        } catch (e) {
+            console.error(e);
+            new Notice('Anki export failed. Check console.');
+        }
+    }
+
+    async updateAnkiCards(file: TFile) {
+        new Notice('Updating Anki cards...');
+        try {
+            const rawText = await this.app.vault.read(file);
+            const { body } = extractFrontmatter(rawText);
+            const chunks = generateChunks(body, this.settings.chunkMode);
+            const fullNoteHtml = await processHtmlMedia(this.app, file, this, body, true);
+            
+            const fullTocLines: {level: number, text: string, raw: string}[] = [];
+            const rawLines = body.split('\n');
+            for (const l of rawLines) {
+                const m = l.match(/^(#{1,6})\s+(.*)/);
+                if (m) fullTocLines.push({ level: m[1].length, text: m[2].replace(/\*/g,'').trim(), raw: l });
+            }
+
+            let updatedCount = 0;
+
+            for (const chunk of chunks) {
+                const uid = `echo_${stringToHash(file.path)}_${stringToHash(chunk.headingText || chunk.content.substring(0, 50))}`;
+                const foundIds = await ankiRequest('findNotes', { query: `ChunkID:"${uid}"` });
+                
+                if (foundIds.length > 0) {
+                    const newContentHtml = await processHtmlMedia(this.app, file, this, chunk.content, true);
+                    const noteInfo = await ankiRequest('notesInfo', { notes: foundIds });
+                    
+                    let localToc = '<ul>';
+                    for (const h of fullTocLines) {
+                        const padding = (h.level - 1) * 15;
+                        const isCurrent = (chunk.immediateHeading === h.text);
+                        localToc += `<li style="margin-left:${padding}px; ${isCurrent ? 'color:#43b569; font-weight:bold;' : 'color:#888;'}">${h.text}</li>`;
+                    }
+                    localToc += '</ul>';
+
+                    const oldContent = noteInfo[0].fields.Content?.value || '';
+                    const oldFull = noteInfo[0].fields.FullNote?.value || '';
+
+                    const newContentClean = newContentHtml.trim();
+                    const oldContentClean = oldContent.trim();
+                    const isContentChanged = oldContentClean !== newContentClean;
+
+                    if (isContentChanged || oldFull !== fullNoteHtml) {
+                        await ankiRequest('updateNoteFields', {
+                            note: { id: foundIds[0], fields: { 
+                                Content: newContentHtml, 
+                                FullNote: fullNoteHtml,
+                                HeadingPath: localToc,
+                                ImmediateHeading: chunk.immediateHeading 
+                            } }
+                        });
+                        
+                        if (isContentChanged) {
+                            const cards = await ankiRequest('findCards', { query: `nid:${foundIds[0]}` });
+                            if (cards.length > 0) await ankiRequest('forgetCards', { cards });
+                            updatedCount++;
+                        }
+                    }
+                }
+            }
+            new Notice(`Anki Update Complete: ${updatedCount} cards updated & reset.`);
+        } catch (e) {
+            console.error(e);
+            new Notice('Anki update failed. Check console.');
+        }
     }
 
     injectHeaderButtons() {
@@ -1187,8 +1720,16 @@ export default class EchoRecallPlugin extends Plugin {
             const view = leaf.view as MarkdownView;
             if (!view || !view.containerEl) return;
             const actions = view.containerEl.querySelector('.view-actions');
+            if(!actions) return;
             
-            if (actions && !actions.querySelector('.echo-header-btn')) {
+            const existingBtn = actions.querySelector('.echo-header-btn');
+            
+            if (!this.settings.enableEchoButton) {
+                if (existingBtn) existingBtn.remove();
+                return;
+            }
+            
+            if (!existingBtn) {
                 const btn = document.createElement('div');
                 btn.className = 'clickable-icon view-action echo-header-btn';
                 btn.setAttribute('aria-label', 'Revise with Echo Recall');
@@ -1287,7 +1828,6 @@ export default class EchoRecallPlugin extends Plugin {
         .echo-master-play { background: var(--interactive-accent); color: var(--text-on-accent); border: none; padding: 12px 24px; border-radius: 20px; font-size: 1.1em; cursor: pointer; display: flex; align-items: center; gap: 8px; font-weight: 600; box-shadow: 0 4px 12px rgba(0,0,0,0.1); transition: opacity 0.2s; }
         .echo-master-play:hover { opacity: 0.9; }
 
-        /* ADVANCED ANALYTICS PANEL */
         .echo-analytics-wrapper { display: flex; gap: 20px; margin-bottom: 25px; flex-wrap: wrap; align-items: stretch; background: var(--background-secondary); border-radius: 12px; border: 1px solid var(--background-modifier-border); padding: 16px 20px;}
         .echo-heatmap-wrapper { flex: 0 0 auto; display: flex; flex-direction: column; gap: 10px; border-right: 1px solid var(--background-modifier-border); padding-right: 20px;}
         .echo-heatmap { margin: 0; padding: 0; border: none; background: transparent; }
@@ -1395,6 +1935,10 @@ export default class EchoRecallPlugin extends Plugin {
         .echo-hm-4 { background: rgba(67, 181, 105, 1); }
         .echo-hm-future { opacity: 0.25; }
 
+        .echo-heavy-headings { margin-bottom: 10px; opacity: 0.8; }
+        .echo-heavy-blank { padding: 30px; text-align: center; border: 2px dashed var(--background-modifier-border); border-radius: 12px; margin-top: 20px;}
+        .echo-heavy-content { margin-top: 20px; text-align: left; }
+
         @media (max-width: 800px) {
             .echo-analytics-wrapper { flex-direction: column; border-right: none; }
             .echo-heatmap-wrapper, .echo-stats-wrapper { border-right: none; border-bottom: 1px solid var(--background-modifier-border); padding-right: 0; padding-bottom: 20px; }
@@ -1432,6 +1976,56 @@ class EchoRecallSettingsTab extends PluginSettingTab {
         containerEl.empty();
 
         containerEl.createEl('h2', { text: 'Echo Recall Settings' });
+
+        containerEl.createEl('h3', { text: 'Study Modes & Export' });
+
+        new Setting(containerEl)
+            .setName("Heavy Recall & Brainstorming Mode")
+            .setDesc("A completely different mode! Instead of fill-in-the-blanks, the whole content under headings is blanked out. Forces strong active recall. Context is preserved.")
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.enableHeavyRecallMode)
+                .onChange(async (val) => {
+                    this.plugin.settings.enableHeavyRecallMode = val;
+                    await this.plugin.saveSettings();
+                    this.display();
+                }));
+
+        if (this.plugin.settings.enableHeavyRecallMode) {
+            new Setting(containerEl)
+                .setName("Heavy Recall: Enable Step 3")
+                .setDesc("Adds a final step where the ENTIRE note is blanked out to test full structural recall.")
+                .addToggle(toggle => toggle
+                    .setValue(this.plugin.settings.heavyRecallStep3)
+                    .onChange(async (val) => {
+                        this.plugin.settings.heavyRecallStep3 = val;
+                        await this.plugin.saveSettings();
+                    }));
+        }
+
+        new Setting(containerEl)
+            .setName("Anki Export: Default Deck")
+            .setDesc("Name of the deck where notes will be exported (Requires AnkiConnect).")
+            .addText(text => text
+                .setPlaceholder("Default")
+                .setValue(this.plugin.settings.ankiDeckName)
+                .onChange(async (val) => {
+                    this.plugin.settings.ankiDeckName = val;
+                    await this.plugin.saveSettings();
+                }));
+                
+        new Setting(containerEl)
+            .setName("Anki Export: Default Tags")
+            .setDesc("Comma separated tags for the Anki cards.")
+            .addText(text => text
+                .setPlaceholder("obsidian")
+                .setValue(this.plugin.settings.ankiTags)
+                .onChange(async (val) => {
+                    this.plugin.settings.ankiTags = val;
+                    await this.plugin.saveSettings();
+                }));
+
+        containerEl.createEl('br');
+        containerEl.createEl('h3', { text: 'General Masking Settings' });
         containerEl.createEl('p', { text: 'Configure which elements should be bypassed by the text masking engine.', cls: 'setting-item-description' });
         containerEl.createEl('br');
 
@@ -1447,7 +2041,7 @@ class EchoRecallSettingsTab extends PluginSettingTab {
                 .onChange(async (val) => {
                     this.plugin.settings.schedulingMode = val as 'confidence' | 'sm2';
                     await this.plugin.saveSettings();
-                    this.display(); // re-render to show/hide the simplify grades toggle
+                    this.display(); 
                 }));
 
         if (this.plugin.settings.schedulingMode === 'sm2') {
@@ -1489,16 +2083,27 @@ class EchoRecallSettingsTab extends PluginSettingTab {
                 }));
 
         new Setting(containerEl)
+            .setName("Enable [▶ echo] Button")
+            .setDesc("Show the echo button in the top right header of your notes.")
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.enableEchoButton)
+                .onChange(async (val) => {
+                    this.plugin.settings.enableEchoButton = val;
+                    await this.plugin.saveSettings();
+                    this.plugin.injectHeaderButtons();
+                }));
+
+        new Setting(containerEl)
             .setName("Chunking")
-            .setDesc("Break a long note into smaller pieces and drill one at a time, then move on. "
-                + "Paragraph: split on blank lines (safely maintains Header context). Sentence: split on sentence endings. Off: review the whole note at once.")
+            .setDesc("Break a long note into pieces. Paragraph: standard block split. Hierarchical: context-aware block split safely on headings. Sentence: split on periods. Off: whole note.")
             .addDropdown(drop => drop
                 .addOption('off', 'Off (whole note)')
-                .addOption('paragraph', 'By paragraph')
+                .addOption('hierarchical', 'Hierarchical (Context-aware)')
+                .addOption('paragraph', 'Paragraph by paragraph')
                 .addOption('sentence', 'By sentence')
                 .setValue(this.plugin.settings.chunkMode)
                 .onChange(async (val) => {
-                    this.plugin.settings.chunkMode = val as 'off' | 'paragraph' | 'sentence';
+                    this.plugin.settings.chunkMode = val as 'off' | 'hierarchical' | 'paragraph' | 'sentence';
                     await this.plugin.saveSettings();
                 }));
 

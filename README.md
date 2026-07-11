@@ -14,7 +14,7 @@
 </table>
 
 ![Obsidian](https://img.shields.io/badge/Obsidian-v1.4.0+-483699.svg?style=for-the-badge&logo=obsidian&logoColor=white)
-![Release](https://img.shields.io/badge/Release-v1.0.0-success.svg?style=for-the-badge)
+![Release](https://img.shields.io/badge/Release-v1.2.0-success.svg?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)
 
 Echo Recall is a lightweight but powerful revision engine for Obsidian. It turns your long study notes into a dynamic memory game. You never have to export your data again.
@@ -31,7 +31,32 @@ For scheduling, this plugin uses spaced repetition. It also uses a "retrospectiv
 
 ---
 
-## 2. Review Workflow 
+## 2. New Updates (experimental)
+
+We have massively expanded what Echo Recall can do. You can configure these in the settings.
+
+### A. Anki Export & Differential Sync
+Do you love Obsidian for notes but prefer Anki for scheduling? Echo Recall now acts as a bridge. Obsidian remains your source of truth, and Anki becomes your revision app. *(Requires the AnkiConnect add-on).*
+
+* **Context-Aware Cards:** Click the **Export to Anki** ribbon icon. It slices your note by headings. Each Anki card displays a full left-sidebar Table of Contents, highlighting exactly where you are in the note.
+* **Rich UI & Full Note View:** The Anki cards use a custom CSS theme that mimics Obsidian. Forgot the context? Click the "👁 View Full Note" button inside Anki to instantly see your entire Obsidian note as an overlay.
+* **Media Support:** Images (`![[]]`) and GIFs are converted to Base64 and injected directly into Anki's media database. No broken links.
+* **Differential Update Engine:** If you edit a paragraph in Obsidian, click the **Update Anki** ribbon icon. The plugin uses string-hashing to push the text updates to Anki, but it will **ONLY** mark the specific changed card as 'Again' (resetting its progress). The rest of your deck's scheduling remains untouched.
+
+### B. Heavy Recall & Brainstorming Mode
+If progressive fill-in-the-blanks is too easy, switch to Heavy Mode. It completely hides the content under your headings to force hardcore brainstorming.
+* **Step 1 (Skim):** View the entire note to prime your memory.
+* **Step 2 (Recall):** Go chunk-by-chunk. You only see the heading. Recall everything under it, then click to reveal.
+* **Step 3 (Final Test):** The entire note is blanked out. Reconstruct the whole document's structure in your head.
+
+### C. Context-Aware Hierarchical Chunking
+Instead of splitting blindly by paragraphs, the new `Hierarchical` chunking setting reads your Markdown headers (`# H1`, `## H2`). When reviewing a small `H3` section, it keeps the `H1` and `H2` parents visible so you never lose the big picture.
+
+**Additional miscellaneous updates are detailed in the release notes.**
+
+---
+
+## 3. Review Workflow 
 
 ### A. The 3-Step Revision and Review
 
@@ -103,7 +128,7 @@ Echo Recall safely reads your markdown text. But you can choose what it ignores 
 
 ---
 
-## 3. Metadata Spec (YAML Schema)
+## 4. Metadata Spec (YAML Schema)
 
 Echo Recall saves all data in your note's YAML properties. This means you own your data forever. It will never break your vault.
 
@@ -130,7 +155,7 @@ echo_history:                    # Array: Appended timestamps for Heatmap
 
 ---
 
-## 4. Scheduling Algorithm
+## 5. Scheduling Algorithm
 
 > [!Philosophy]
 > It's NOT necessary to revise ALL your daily due cards. It is completely up to you! My personal goal is to hit "EASY" on all notes before my exam arrives. My exam is months away, so spaced repetition keeps me from forgetting. You can use spaced repetition alone, use it with deadlines, or just use deadlines. Feel free to ignore this and study your own way!

@@ -1,9 +1,20 @@
 {
   "id": "echo-recall",
   "name": "Echo Recall",
-  "version": "1.2.0",
+  "version": "2.0.0",
   "minAppVersion": "1.1.0",
-  "description": "Memorize your notes and paragraphs actively with spaced repetition and retrospective deadlines.",
+  "description": "Memorize and Revise your notes actively with spaced repetition and retrospective deadlines. Now Featuring Anki Export with Differential Sync and Chunking.",
   "author": "sxjeel",
-  "isDesktopOnly": false
+  "isDesktopOnly": false,
+  "keywords": [
+    "spaced repetition",
+    "active recall",
+    "revision",
+    "anki",
+    "flashcards",
+    "studying",
+    "sync",
+    "export",
+    "chunking"
+  ]
 }

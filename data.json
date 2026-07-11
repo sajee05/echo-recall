@@ -10,7 +10,12 @@
   "schedulingMode": "sm2",
   "cueMode": "graduated",
   "enableTypedRecall": false,
-  "chunkMode": "paragraph",
-  "interleaveDueQueue": false,
-  "sm2SimplifyGrades": true
+  "chunkMode": "hierarchical",
+  "interleaveDueQueue": true,
+  "sm2SimplifyGrades": true,
+  "enableEchoButton": true,
+  "enableHeavyRecallMode": true,
+  "heavyRecallStep3": false,
+  "ankiDeckName": "**Obsidian-Notes",
+  "ankiTags": "obsidian"
 }
