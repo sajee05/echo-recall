@@ -50,9 +50,10 @@ var LEECH_REVISIONS = 8;
 function arrayBufferToBase64(buffer) {
   let binary = "";
   const bytes = new Uint8Array(buffer);
-  const len = bytes.byteLength;
-  for (let i = 0; i < len; i++) {
-    binary += String.fromCharCode(bytes[i]);
+  const chunkSize = 32768;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode.apply(null, Array.from(chunk));
   }
   return window.btoa(binary);
 }
@@ -301,6 +302,9 @@ async function setupAnkiNoteType() {
                     h1, h2, h3, h4, h5, h6 { color: var(--heading-color); font-weight: 600; margin-top: 1.5em; margin-bottom: 0.5em; }
                     .echo-anki-content h2.immediate-heading { color: var(--accent-color); text-align: center; margin-top: 0; margin-bottom: 25px; font-size: 1.6em; border-bottom: 1px solid var(--border-color); padding-bottom: 15px; }
                     
+                    /* Breadcrumbs CSS (CHANGED TO PURE WHITE) */
+                    .echo-breadcrumbs { display: block; width: 100%; text-align: center; font-size: 0.9em; color: #ffffff; opacity: 1; margin-top: -15px; margin-bottom: 15px; font-weight: 600; line-height: 1.4; }
+
                     strong { color: var(--bold-color); font-weight: 600; }
                     em, i { color: var(--accent-color); }
                     hr { border: none; border-top: 1px solid var(--border-color); margin: 25px 0; }
@@ -363,6 +367,99 @@ async function setupAnkiNoteType() {
                                         e.stopPropagation();
                                     }
                                 }, true);
+
+                                // FRONT SCRIPT: Calculates Breadcrumb & Smooth Scrolls
+                                setTimeout(function() {
+                                    var toc = document.querySelector('.echo-anki-toc');
+                                    var immediateHeading = document.querySelector('.immediate-heading');
+                                    
+                                    if (toc && immediateHeading) {
+                                        var headingText = immediateHeading.textContent.trim();
+                                        if (!headingText) return;
+
+                                        var allElements = toc.querySelectorAll('*');
+                                        var activeEl = null;
+                                        
+                                        // 1. Find Active Item in TOC
+                                        for (var i = 0; i < allElements.length; i++) {
+                                            var el = allElements[i];
+                                            var clone = el.cloneNode(true);
+                                            // Remove nested lists to get clean text
+                                            var subLists = clone.querySelectorAll('ul, ol, div.children');
+                                            for (var j = 0; j < subLists.length; j++) {
+                                                if (subLists[j].parentNode) subLists[j].parentNode.removeChild(subLists[j]);
+                                            }
+                                            if (clone.textContent.trim() === headingText) {
+                                                activeEl = el;
+                                                break;
+                                            }
+                                        }
+
+                                        if (activeEl) {
+                                            // Make active item green
+                                            activeEl.style.color = "var(--accent-color)";
+                                            activeEl.style.fontWeight = "bold";
+                                            
+                                            // Smooth scroll TOC to this item
+                                            activeEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+                                            // 2. Generate Breadcrumbs
+                                            var breadcrumbs = [];
+                                            var currentLi = activeEl.closest('li');
+                                            
+                                            if (currentLi) {
+                                                // Traverse standard list structure
+                                                while (currentLi) {
+                                                    var cloneLi = currentLi.cloneNode(true);
+                                                    var subs = cloneLi.querySelectorAll('ul, ol');
+                                                    for (var k = 0; k < subs.length; k++) {
+                                                        if (subs[k].parentNode) subs[k].parentNode.removeChild(subs[k]);
+                                                    }
+                                                    var text = cloneLi.textContent.trim().replace(/s+/g, ' ');
+                                                    if (text) breadcrumbs.unshift(text);
+                                                    
+                                                    var parentUl = currentLi.parentElement;
+                                                    currentLi = parentUl ? parentUl.closest('li') : null;
+                                                }
+                                            } 
+                                            
+                                            // Fallback for visual indented structures if lists aren't used
+                                            if (breadcrumbs.length <= 1) {
+                                                breadcrumbs = [];
+                                                var leafItems = [];
+                                                for (var n = 0; n < allElements.length; n++) {
+                                                    if (allElements[n].children.length === 0 && allElements[n].textContent.trim().length > 0) {
+                                                        leafItems.push(allElements[n]);
+                                                    }
+                                                }
+                                                var activeIdx = leafItems.indexOf(activeEl);
+                                                if (activeIdx !== -1) {
+                                                    breadcrumbs.unshift(leafItems[activeIdx].textContent.trim());
+                                                    var currentLeft = leafItems[activeIdx].getBoundingClientRect().left;
+                                                    for (var m = activeIdx - 1; m >= 0; m--) {
+                                                        var prevLeft = leafItems[m].getBoundingClientRect().left;
+                                                        if (prevLeft < currentLeft - 5) { 
+                                                            breadcrumbs.unshift(leafItems[m].textContent.trim());
+                                                            currentLeft = prevLeft;
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            // Insert Breadcrumbs & Save State for Back Card
+                                            if (breadcrumbs.length > 0) {
+                                                var bcHTML = breadcrumbs.join(' <span style="color: var(--accent-color); margin: 0 5px; font-weight: bold;">/</span> ');
+                                                var bcDiv = document.createElement('div');
+                                                bcDiv.className = 'echo-breadcrumbs';
+                                                bcDiv.innerHTML = bcHTML;
+                                                immediateHeading.parentNode.insertBefore(bcDiv, immediateHeading);
+                                                
+                                                // Save to sessionStorage to stop double-processing on Back
+                                                try { sessionStorage.setItem('echo_bc_' + headingText, bcHTML); } catch(e){}
+                                            }
+                                        }
+                                    }
+                                }, 10);
                             <\/script>
                         `,
             Back: `
@@ -393,6 +490,51 @@ async function setupAnkiNoteType() {
                                         e.stopPropagation();
                                     }
                                 }, true);
+
+                                // BACK SCRIPT: Instant alignment (No Slide) & Retrieves saved Breadcrumb
+                                setTimeout(function() {
+                                    var toc = document.querySelector('.echo-anki-toc');
+                                    var immediateHeading = document.querySelector('.immediate-heading');
+                                    
+                                    if (toc && immediateHeading) {
+                                        var headingText = immediateHeading.textContent.trim();
+                                        if (!headingText) return;
+
+                                        var allElements = toc.querySelectorAll('*');
+                                        var activeEl = null;
+                                        
+                                        for (var i = 0; i < allElements.length; i++) {
+                                            var el = allElements[i];
+                                            var clone = el.cloneNode(true);
+                                            var subLists = clone.querySelectorAll('ul, ol, div.children');
+                                            for (var j = 0; j < subLists.length; j++) {
+                                                if (subLists[j].parentNode) subLists[j].parentNode.removeChild(subLists[j]);
+                                            }
+                                            if (clone.textContent.trim() === headingText) {
+                                                activeEl = el;
+                                                break;
+                                            }
+                                        }
+
+                                        if (activeEl) {
+                                            activeEl.style.color = "var(--accent-color)";
+                                            activeEl.style.fontWeight = "bold";
+                                            // INSTANT jump (No animation) so user doesn't see it shift on flip
+                                            activeEl.scrollIntoView({ block: 'center' });
+                                        }
+
+                                        // Fetch Breadcrumb instantly from memory
+                                        var cachedBc = null;
+                                        try { cachedBc = sessionStorage.getItem('echo_bc_' + headingText); } catch(e){}
+                                        
+                                        if (cachedBc) {
+                                            var bcDiv = document.createElement('div');
+                                            bcDiv.className = 'echo-breadcrumbs';
+                                            bcDiv.innerHTML = cachedBc;
+                                            immediateHeading.parentNode.insertBefore(bcDiv, immediateHeading);
+                                        }
+                                    }
+                                }, 10);
                             <\/script>
                         `
           }
@@ -403,34 +545,93 @@ async function setupAnkiNoteType() {
     console.warn("AnkiConnect not detected or failed to set up Note Type.");
   }
 }
-async function processHtmlMedia(app, file, component, markdown, ankiSync = false) {
+async function processHtmlMedia(app, file, component, markdown, ankiSync = false, depth = 0, mediaCache = /* @__PURE__ */ new Set(), noteCache = /* @__PURE__ */ new Map()) {
+  if (depth > 3) return "<span style='color:var(--text-error); font-size:0.8em;'>[Link depth limit reached]</span>";
   let processed = markdown;
-  const wikiRegex = /!\[\[([^\]|]+)(?:\|[^\]]*)?\]\]/g;
-  const mdRegex = /!\[.*?\]\(([^)]+)\)/g;
-  const replaceMedia = async (match, filename) => {
-    const destFile = app.metadataCache.getFirstLinkpathDest(decodeURIComponent(filename), file.path);
-    if (destFile instanceof import_obsidian.TFile && ["png", "jpg", "jpeg", "gif", "webp", "svg", "mp3", "mp4"].includes(destFile.extension)) {
-      if (ankiSync) {
-        const arr = await app.vault.readBinary(destFile);
-        const b64 = arrayBufferToBase64(arr);
+  const placeholders = {};
+  let placeholderCounter = 0;
+  if (ankiSync) {
+    const wikiRegex = /!\[\[([^\]|]+)(?:\|([^\]]*))?\]\]/g;
+    const mdRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
+    const replaceMedia = async (match, filename, sizeOrAlt) => {
+      const destFile = app.metadataCache.getFirstLinkpathDest(decodeURIComponent(filename), file.path);
+      if (destFile instanceof import_obsidian.TFile && ["png", "jpg", "jpeg", "gif", "webp", "svg", "mp3", "mp4"].includes(destFile.extension)) {
         const ankiFilename = `echo_${stringToHash(destFile.path)}_${destFile.name}`;
-        await ankiRequest("storeMediaFile", { filename: ankiFilename, data: b64 });
-        return `<img src="${ankiFilename}">`;
+        if (!mediaCache.has(ankiFilename)) {
+          const arr = await app.vault.readBinary(destFile);
+          const b64 = arrayBufferToBase64(arr);
+          await ankiRequest("storeMediaFile", { filename: ankiFilename, data: b64 });
+          mediaCache.add(ankiFilename);
+        }
+        let widthAttr = "";
+        if (sizeOrAlt) {
+          const wMatch = sizeOrAlt.match(/^(\d+)(x\d+)?$/);
+          if (wMatch) {
+            widthAttr = `width="${wMatch[1]}"`;
+          } else {
+            const maybeNum = parseInt(sizeOrAlt.replace(/[^0-9]/g, ""));
+            if (!isNaN(maybeNum) && maybeNum > 0) widthAttr = `width="${maybeNum}"`;
+          }
+        }
+        const imgHtml = `<img src="${ankiFilename}" ${widthAttr} style="max-width: 100%; height: auto; border-radius: 8px; margin: 10px 0; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">`;
+        const pid = `ECHOMODALPLACEHOLDER${placeholderCounter}END`;
+        placeholderCounter++;
+        placeholders[pid] = imgHtml;
+        return pid;
+      }
+      return match;
+    };
+    const wikiMatches = [...processed.matchAll(wikiRegex)];
+    for (const m of wikiMatches) {
+      processed = processed.replace(m[0], await replaceMedia(m[0], m[1], m[2]));
+    }
+    const mdMatches = [...processed.matchAll(mdRegex)];
+    for (const m of mdMatches) {
+      processed = processed.replace(m[0], await replaceMedia(m[0], m[2], m[1]));
+    }
+  }
+  if (ankiSync) {
+    const noteLinkRegex = /(!?)\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|([^\]]*))?\]\]/g;
+    const linkMatches = [...processed.matchAll(noteLinkRegex)];
+    for (const m of linkMatches) {
+      const isEmbed = m[1] === "!";
+      const linkTarget = m[2].trim();
+      const displayText = m[3] ? m[3].trim() : linkTarget;
+      if (linkTarget.match(/\.(png|jpg|jpeg|gif|webp|svg|mp3|mp4)$/i)) continue;
+      const destFile = app.metadataCache.getFirstLinkpathDest(linkTarget, file.path);
+      if (destFile instanceof import_obsidian.TFile && destFile.extension === "md") {
+        let linkedNoteHtml = "";
+        if (noteCache.has(destFile.path)) {
+          linkedNoteHtml = noteCache.get(destFile.path);
+        } else {
+          const noteContent = await app.vault.read(destFile);
+          let cleanContent = noteContent;
+          const cleanContentMatch = noteContent.match(/^---\n[\s\S]*?\n---\n/);
+          if (cleanContentMatch) cleanContent = noteContent.slice(cleanContentMatch[0].length);
+          linkedNoteHtml = await processHtmlMedia(app, destFile, component, cleanContent.trim(), true, depth + 1, mediaCache, noteCache);
+          noteCache.set(destFile.path, linkedNoteHtml);
+        }
+        const pid = `ECHOMODALPLACEHOLDER${placeholderCounter}END`;
+        placeholderCounter++;
+        if (isEmbed) {
+          placeholders[pid] = `<div style="border-left: 4px solid var(--accent-color, #43b569); padding: 15px 20px; margin: 15px 0; background: rgba(0,0,0,0.03); border-radius: 0 8px 8px 0;"><strong>${displayText}</strong><hr style="margin: 10px 0; opacity:0.5;">${linkedNoteHtml}</div>`;
+        } else {
+          const modalId = "modal_" + stringToHash(destFile.path + Math.random().toString());
+          placeholders[pid] = `<span onclick="document.getElementById('${modalId}').style.display='flex'; event.preventDefault(); event.stopPropagation();" style="color:var(--accent-color, #43b569); cursor:pointer; font-weight:bold; border-bottom: 1.5px dashed var(--accent-color, #43b569); transition: opacity 0.2s;">&#91;&#91;${displayText}&#93;&#93;</span><div id="${modalId}" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.65); z-index:99999; justify-content:center; align-items:center; backdrop-filter: blur(4px);" onclick="this.style.display='none'; event.preventDefault(); event.stopPropagation();"><div style="background:var(--bg-color, #262831); color:var(--text-color, #c9cdd2); padding:35px 45px; border-radius:12px; width:85%; max-width:850px; max-height:85%; overflow-y:auto; border:1px solid var(--border-color, #3b3e48); box-shadow: 0 15px 50px rgba(0,0,0,0.5); text-align: left; position: relative; cursor:default;" onclick="event.stopPropagation()"><div style="font-weight:bold; font-size:1.4em; color:var(--heading-color, #d07353); margin-bottom:20px; border-bottom:1px solid var(--border-color, #3b3e48); padding-bottom:15px; display:flex; justify-content:space-between; align-items:center;"><span>\u{1F517} ${displayText}</span><span onclick="document.getElementById('${modalId}').style.display='none'; event.stopPropagation();" style="cursor:pointer; color:var(--text-muted, #888); font-size: 1.2em; padding: 5px; background: rgba(0,0,0,0.1); border-radius: 6px; width:30px; height:30px; display:flex; align-items:center; justify-content:center;">\u2716</span></div><div style="font-size: 1em; line-height: 1.6;">${linkedNoteHtml}</div></div></div>`;
+        }
+        processed = processed.replace(m[0], pid);
       }
     }
-    return match;
-  };
-  const wikiMatches = [...processed.matchAll(wikiRegex)];
-  for (const m of wikiMatches) {
-    processed = processed.replace(m[0], await replaceMedia(m[0], m[1]));
-  }
-  const mdMatches = [...processed.matchAll(mdRegex)];
-  for (const m of mdMatches) {
-    processed = processed.replace(m[0], await replaceMedia(m[0], m[1]));
   }
   const div = document.createElement("div");
   await import_obsidian.MarkdownRenderer.render(app, processed, div, file.path, component);
-  return div.innerHTML;
+  let finalHtml = div.innerHTML;
+  if (ankiSync) {
+    for (const [pid, html] of Object.entries(placeholders)) {
+      finalHtml = finalHtml.split(pid).join(html);
+    }
+  }
+  return finalHtml;
 }
 var RevisionItemView = class extends import_obsidian.ItemView {
   constructor(leaf, plugin) {
@@ -1422,13 +1623,18 @@ var EchoRecallPlugin = class extends import_obsidian.Plugin {
     }
   }
   async exportNoteToAnki(file) {
-    new import_obsidian.Notice("Exporting to Anki (generating HTML)...");
+    let exportNotice = new import_obsidian.Notice("Echo Recall: Initializing Anki export...", 0);
+    console.log(`[Echo Recall] Starting export for: ${file.basename}`);
     try {
       await this.createDeckIfNeeded();
       const rawText = await this.app.vault.read(file);
       const { body } = extractFrontmatter(rawText);
       const chunks = generateChunks(body, this.settings.chunkMode);
-      const fullNoteHtml = await processHtmlMedia(this.app, file, this, body, true);
+      const mediaCache = /* @__PURE__ */ new Set();
+      const noteCache = /* @__PURE__ */ new Map();
+      exportNotice.noticeEl.innerText = `Echo Recall: Processing full note media...`;
+      console.log(`[Echo Recall] Processing full note HTML and media cache...`);
+      const fullNoteHtml = await processHtmlMedia(this.app, file, this, body, true, 0, mediaCache, noteCache);
       const obsidianUri = `obsidian://open?vault=${encodeURIComponent(this.app.vault.getName())}&file=${encodeURIComponent(file.path)}`;
       const fullTocLines = [];
       const rawLines = body.split("\n");
@@ -1437,7 +1643,11 @@ var EchoRecallPlugin = class extends import_obsidian.Plugin {
         if (m) fullTocLines.push({ level: m[1].length, text: m[2].replace(/\*/g, "").trim(), raw: l });
       }
       const notes = [];
+      let currentChunk = 0;
       for (const chunk of chunks) {
+        currentChunk++;
+        exportNotice.noticeEl.innerText = `Echo Recall: Processing chunk ${currentChunk} of ${chunks.length}...`;
+        console.log(`[Echo Recall] Processing chunk ${currentChunk}/${chunks.length}...`);
         const uid = `echo_${stringToHash(file.path)}_${stringToHash(chunk.headingText || chunk.content.substring(0, 50))}`;
         let localToc = '<ul style="list-style-type:none; padding-left:0; margin:0;">';
         for (const h of fullTocLines) {
@@ -1454,7 +1664,7 @@ var EchoRecallPlugin = class extends import_obsidian.Plugin {
             NoteTitle: file.basename,
             HeadingPath: localToc || "<i>Full Note / Paragraph</i>",
             ImmediateHeading: chunk.immediateHeading,
-            Content: await processHtmlMedia(this.app, file, this, chunk.content, true),
+            Content: await processHtmlMedia(this.app, file, this, chunk.content, true, 0, mediaCache, noteCache),
             FullNote: fullNoteHtml,
             ObsidianURI: obsidianUri,
             _WARNING: "DO NOT EDIT IN ANKI. Obsidian is the source of truth."
@@ -1463,24 +1673,45 @@ var EchoRecallPlugin = class extends import_obsidian.Plugin {
           options: { allowDuplicate: false }
         });
       }
-      const results = await ankiRequest("addNotes", { notes });
+      exportNotice.noticeEl.innerText = `Echo Recall: Sending ${notes.length} notes to Anki in batches...`;
+      console.log(`[Echo Recall] Sending ${notes.length} notes to Anki in batches of 5 to prevent Anki from freezing...`);
       let added = 0;
       let skipped = 0;
-      results.forEach((r) => r === null ? skipped++ : added++);
+      const BATCH_SIZE = 5;
+      for (let i = 0; i < notes.length; i += BATCH_SIZE) {
+        const batch = notes.slice(i, i + BATCH_SIZE);
+        exportNotice.noticeEl.innerText = `Echo Recall: Sending notes ${i + 1} to ${Math.min(i + BATCH_SIZE, notes.length)} of ${notes.length}...`;
+        console.log(`[Echo Recall] Sending batch ${Math.floor(i / BATCH_SIZE) + 1} (notes ${i + 1}-${Math.min(i + BATCH_SIZE, notes.length)})...`);
+        try {
+          const results = await ankiRequest("addNotes", { notes: batch });
+          results.forEach((r) => r === null ? skipped++ : added++);
+        } catch (batchErr) {
+          console.error(`[Echo Recall] Batch ${Math.floor(i / BATCH_SIZE) + 1} failed:`, batchErr);
+          throw batchErr;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+      exportNotice.hide();
       new import_obsidian.Notice(`Anki Export Complete: ${added} added, ${skipped} skipped.`);
+      console.log(`[Echo Recall] Export Complete. ${added} added, ${skipped} skipped.`);
       if (skipped > 0) new import_obsidian.Notice("Skipped cards might already exist. Try the Update command.");
     } catch (e) {
-      console.error(e);
-      new import_obsidian.Notice("Anki export failed. Check console.");
+      console.error("[Echo Recall] Anki export failed:", e);
+      if (typeof exportNotice !== "undefined") exportNotice.hide();
+      new import_obsidian.Notice("Anki export failed. Check console for details.", 5e3);
     }
   }
   async updateAnkiCards(file) {
-    new import_obsidian.Notice("Updating Anki cards...");
+    let updateNotice = new import_obsidian.Notice("Echo Recall: Initializing Anki update...", 0);
+    console.log(`[Echo Recall] Starting update for: ${file.basename}`);
     try {
       const rawText = await this.app.vault.read(file);
       const { body } = extractFrontmatter(rawText);
       const chunks = generateChunks(body, this.settings.chunkMode);
-      const fullNoteHtml = await processHtmlMedia(this.app, file, this, body, true);
+      const mediaCache = /* @__PURE__ */ new Set();
+      const noteCache = /* @__PURE__ */ new Map();
+      updateNotice.noticeEl.innerText = `Echo Recall: Fetching updated full note...`;
+      const fullNoteHtml = await processHtmlMedia(this.app, file, this, body, true, 0, mediaCache, noteCache);
       const fullTocLines = [];
       const rawLines = body.split("\n");
       for (const l of rawLines) {
@@ -1488,11 +1719,14 @@ var EchoRecallPlugin = class extends import_obsidian.Plugin {
         if (m) fullTocLines.push({ level: m[1].length, text: m[2].replace(/\*/g, "").trim(), raw: l });
       }
       let updatedCount = 0;
+      let currentChunk = 0;
       for (const chunk of chunks) {
+        currentChunk++;
+        updateNotice.noticeEl.innerText = `Echo Recall: Checking Anki for chunk ${currentChunk} of ${chunks.length}...`;
         const uid = `echo_${stringToHash(file.path)}_${stringToHash(chunk.headingText || chunk.content.substring(0, 50))}`;
         const foundIds = await ankiRequest("findNotes", { query: `ChunkID:"${uid}"` });
         if (foundIds.length > 0) {
-          const newContentHtml = await processHtmlMedia(this.app, file, this, chunk.content, true);
+          const newContentHtml = await processHtmlMedia(this.app, file, this, chunk.content, true, 0, mediaCache, noteCache);
           const noteInfo = await ankiRequest("notesInfo", { notes: foundIds });
           let localToc = "<ul>";
           for (const h of fullTocLines) {
@@ -1523,10 +1757,13 @@ var EchoRecallPlugin = class extends import_obsidian.Plugin {
           }
         }
       }
+      updateNotice.hide();
+      console.log(`[Echo Recall] Update Complete. ${updatedCount} cards updated.`);
       new import_obsidian.Notice(`Anki Update Complete: ${updatedCount} cards updated & reset.`);
     } catch (e) {
-      console.error(e);
-      new import_obsidian.Notice("Anki update failed. Check console.");
+      console.error("[Echo Recall] Anki update failed:", e);
+      if (typeof updateNotice !== "undefined") updateNotice.hide();
+      new import_obsidian.Notice("Anki update failed. Check console for details.", 5e3);
     }
   }
   injectHeaderButtons() {

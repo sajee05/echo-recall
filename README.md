@@ -27,7 +27,7 @@ Echo Recall is a lightweight but powerful revision engine for Obsidian. It turns
 
 **The Solution:** Echo Recall fixes this problem. It brings the testing environment directly to your notes. Just open a note and click "**[▶ echo]**" in the top right. Follow the instructions on the screen. That's it! You have reviewed your note.
 
-For scheduling, this plugin uses spaced repetition. It also uses a "retrospective revision" schedule based on your deadlines. This idea was [conceptualized by Ali Abdaal](https://youtu.be/b7o09a7t4RA?t=9).
+For scheduling, this plugin uses spaced repetition. It also uses a "retrospective revision" schedule based on your deadlines. This idea was [conceptualized by Ali Abdaal](https://aliabdaal.com/retrospective-revision-timetable/).
 
 ---
 
@@ -66,6 +66,12 @@ When you start a session, Echo Recall opens a clean UI in a new tab. This uses a
 
 Progressive = Masking gets harder based on your confidence level. If a note is **Hard**, it uses normal masking. If **Moderate**, it hides 10% more words. If **Easy**, it hides 20% more words. This forces you to remember more with fewer clues.
 
+#### Smarter Review Tools (New in v1.2.0)
+* **Context Chunking:** Break long notes into smaller chunks (paragraphs/sentences). The engine safely remembers your `## Headings` so you never lose context!
+* **The Peek Button (👁️):** Forget what the chunk is about? Click the Eye icon to quickly peek at the full, unhidden note.
+* **Graduated Cueing:** Turn full blanks into first-letter hints (like `w____`) to help nudge your memory.
+* **Typed Recall:** Open a text box, type what you remember, and get an exact accuracy percentage.
+
 #### Step 1: Read-Through View
 This step helps your brain remember the note's flow.
 * **Functionality:** It shows your full markdown text clearly. Nothing is hidden yet. 
@@ -94,20 +100,25 @@ Click the brain icon in the ribbon to open the Dashboard. This is your main cont
 #### 1. "Due Today" 
 This shows a big number of notes you need to review today. It has a **[▶ Start Due Notes]** button. Click it to instantly start reviewing all your due notes in order.
 
-#### 2. Data Navigation Tabs
+#### 2. Advanced Analytics Panel
+* **Stats Board:** Track your Current Streak (🔥), total revisions, and average daily reviews.
+* **Revision Heatmap & Future Echoes:** Beautiful charts showing your past consistency and exactly how many notes are due over the next 7 days.
+
+#### 3. Data Navigation Tabs
 * **"View All":** A clean list of all tracked notes in your vault. You can sort them by date.
 * **"Tag-wise View":** This groups your notes by custom "Echo tags". It shows stats for each tag, like total reviews and confidence levels.
+	* *New:* You can now bulk-apply a deadline to a tag, bulk-archive a tag, or click `[▶ echo all]` to instantly review all notes in that tag!
 	* *Note:* These are different from standard Obsidian tags. Echo tags help you organize notes for a specific exam. 
 * **"Archives":** This shows archived notes. They are completely hidden from your review schedule.
 	* Think of this like "suspending" cards in Anki. 
 	* When an exam is over, just archive those notes! You can unarchive them later. Archived notes ignore spaced repetition.
 
-#### 3. Dashboard Data Table Columns
+#### 4. Dashboard Data Table Columns
 
 | Column Name      | Functionality & Interaction                                                                                               |
 | :--------------- | :------------------------------------------------------------------------------------------------------------------------ |
 | **Date Added**   | Shows when the note was first added to Echo Recall.                                                                       |
-| **Note Title**   | Click this to instantly open the markdown file.                                                                           |
+| **Note Title**   | Click this to instantly open the markdown file. Notes failing 8+ times get a 🩸 Leech warning.                            |
 | **Tags**         | Click `+ tag` to add and remove Echo tags easily.                                                                         |
 | **Revs**         | Shows the total number of times you finished a 3-step review.                                                             |
 | **Last Revised** | Shows the exact date you last reviewed this note.                                                                         |
@@ -148,8 +159,11 @@ echo_deadline: 2024-02-01        # YYYY-MM-DD: Target exam/deadline date
 echo_archived: false             # Boolean: Suspension state
 echo_history:                    # Array: Appended timestamps for Heatmap
   - 2024-01-01
-  - 2024-01-08
-  - 2024-01-15
+echo_ease: 2.5                   # (SM-2) Ease multiplier
+echo_interval: 6                 # (SM-2) Uncapped interval
+echo_reps: 2                     # (SM-2) Consecutive passes
+echo_past_grades:                # (SM-2) Last grades history
+  - Good
 ---
 ```
 
@@ -157,15 +171,20 @@ echo_history:                    # Array: Appended timestamps for Heatmap
 
 ## 5. Scheduling Algorithm
 
-> [!Philosophy]
+> [!info] philosophy
 > It's NOT necessary to revise ALL your daily due cards. It is completely up to you! My personal goal is to hit "EASY" on all notes before my exam arrives. My exam is months away, so spaced repetition keeps me from forgetting. You can use spaced repetition alone, use it with deadlines, or just use deadlines. Feel free to ignore this and study your own way!
 
+**Engine A: Standard Confidence (Fixed Multipliers)**
 Standard spaced repetition uses fixed days. Echo Recall sets intervals based on your choice:
 * **Hard:** 1 Day
 * **Moderate:** 7 Days
 * **Easy:** 14 Days
 
-Studying for exams also requires **Deadline Prioritization**. If you add an `echo_deadline`, the plugin counts the days left until your exam. 
+**Engine B: Adaptive SM-2 (Opt-in via Settings)**
+If you enable SM-2 scheduling, your intervals adapt based on a post-session grade (Again, Hard, Good, Easy) using industry-standard SM-2 math. *Pro-tip: Enable "Simplify SM-2 grades" in settings to only show Pass/Fail buttons and prevent decision fatigue.*
+
+**Deadline Prioritization (The Override)**
+Studying for exams also requires deadlines. If you add an `echo_deadline`, the plugin counts the days left until your exam. 
 
 **The Override Logic:**
 Is your confidence marked "Hard" or "Moderate"? Are you running out of time before the deadline? If so, the plugin safely shortens your wait time. It ensures you review the note again before test day.
@@ -174,4 +193,16 @@ Is your confidence marked "Hard" or "Moderate"? Are you running out of time befo
 ```javascript
 Days = Math.max(1, Math.floor(DaysRemaining * 0.5))
 ```
+<<<<<<< HEAD
 *Example:* A "Moderate" note usually waits 7 days. But what if your exam is in 4 days? The plugin cuts the wait to 2 days (`4 * 0.5`). You will safely review it before the test.
+=======
+*Example:* A "Moderate" note usually waits 7 days. But what if your exam is in 4 days? The plugin cuts the wait to 2 days (`4 * 0.5`). You will safely review it before the test.
+
+---
+
+## Credits & Contributors
+* **[sxjeel](https://github.com/sajee05):** Creator and maintainer, Ideation, UI/UX, Dashboard, analytics, Context-aware chunking, etc. ☕
+* **[@DocGRD](https://github.com/DocGRD):** Core contributor of the Adaptive SM-2 logic, base Chunking engine, Graduated cueing, and Typed-recall scoring. 🧩
+
+A massive thank you to the open-source community for helping improve Echo Recall!
+>>>>>>> 44784f2231a4f3761c1314dad1c74b7affb69280
