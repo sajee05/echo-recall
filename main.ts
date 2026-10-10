@@ -23,10 +23,12 @@ interface EchoRecallSettings {
     sm2SimplifyGrades: boolean; 
     enableEchoButton: boolean;
 
+    studyMode: string;
     enableHeavyRecallMode: boolean;
     heavyRecallStep3: boolean;
     ankiDeckName: string;
     ankiTags: string;
+    ankiConnectPort: number;
 }
 
 const DEFAULT_SETTINGS: EchoRecallSettings = {
@@ -45,10 +47,12 @@ const DEFAULT_SETTINGS: EchoRecallSettings = {
     interleaveDueQueue: false,
     sm2SimplifyGrades: false,
     enableEchoButton: true,
-    enableHeavyRecallMode: false,
+    studyMode: 'heading',
+    enableHeavyRecallMode: true,
     heavyRecallStep3: false,
     ankiDeckName: 'Default',
-    ankiTags: 'obsidian'
+    ankiTags: 'obsidian',
+    ankiConnectPort: 8765
 };
 
 const LEECH_REVISIONS = 8;
@@ -313,325 +317,298 @@ function generateChunks(text: string, mode: string): ChunkData[] {
 
 // --- ANKI CONNECT INTEGRATION ---
 
-async function ankiRequest(action: string, params: any = {}) {
+let ANKI_CONNECT_PORT = 8765;
+
+async function seedExistingAnkiMedia(): Promise<Set<string>> {
+    const cache = new Set<string>();
     try {
-        const response = await fetch('http://127.0.0.1:8765', {
-            method: 'POST',
-            body: JSON.stringify({ action, version: 6, params })
-        });
-        const result = await response.json();
-        if (result.error) throw new Error(result.error);
-        return result.result;
+        const names = await ankiRequest('getMediaFilesNames', { pattern: 'echo_*' });
+        if (Array.isArray(names)) names.forEach((n: string) => cache.add(n));
+    } catch (e) { /* non-fatal */ }
+    return cache;
+}
+
+class AnkiApiError extends Error {}
+
+async function ankiRequest(action: string, params: any = {}) {
+    let brief = '';
+    try { const s = JSON.stringify(params); brief = s.length > 300 ? `${s.slice(0, 300)}…(${s.length} chars)` : s; } catch (_) { brief = '[unserializable]'; }
+    for (let attempt = 0; ; attempt++) {
+        const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        const timer = ctrl ? setTimeout(() => ctrl.abort(), 60000) : null;
+        try {
+            const response = await fetch(`http://127.0.0.1:${ANKI_CONNECT_PORT}`, {
+                method: 'POST',
+                body: JSON.stringify({ action, version: 6, params }),
+                signal: ctrl ? ctrl.signal : undefined
+            });
+            if (!response.ok) throw new Error(`HTTP ${response.status} ${response.statusText}`);
+            const result = await response.json();
+            if (result.error) throw new AnkiApiError(`AnkiConnect "${action}": ${result.error}`);
+            return result.result;
+        } catch (e) {
+            const isApi = e instanceof AnkiApiError;
+            if (!isApi && attempt < 1) {
+                console.warn(`[Echo Recall][AnkiConnect] ${action} network error, retrying once...`, e);
+                await new Promise(r => setTimeout(r, 400));
+                continue;
+            }
+            console.error(`[Echo Recall][AnkiConnect] FAILED action=${action} port=${ANKI_CONNECT_PORT} attempt=${attempt + 1} params=${brief}`, e);
+            if (!isApi) console.error('[Echo Recall][AnkiConnect] Hint: Anki must be open, AnkiConnect installed, and the port in Echo Recall settings must match AnkiConnect\'s config. A timeout can mean Anki is busy or a dialog is open.');
+            else console.error('[Echo Recall][AnkiConnect] Hint: if this mentions a note being edited, close Anki\'s Browse window and retry.');
+            throw e;
+        } finally {
+            if (timer) clearTimeout(timer);
+        }
+    }
+}
+
+const ANKI_MODEL_NAME = 'EchoRecall_v8';
+const ANKI_CARD_NAME = 'Echo Recall Card';
+const ANKI_TPL_MARKER = '/* echo-tpl:10 */';
+
+const ECHO_ANKI_CSS = `/* echo-tpl:10 */
+.card,html,body{--bg-color:#fbfbfd;--surface:#fff;--text-color:#1d1d1f;--text-muted:#6e6e73;--text-error:#d93025;--heading-color:#c2512a;--bold-color:#b8481f;--accent-color:#1f8a3b;--border-color:rgba(60,60,67,.2);--chip:rgba(120,120,128,.13);--mark-bg:rgba(255,204,0,.38);--overlay:rgba(0,0,0,.4)}
+.nightMode .card,.night_mode .card,.card.nightMode,.card.night_mode,html.nightMode,html.night_mode,body.nightMode,body.night_mode{--bg-color:#1c1c1e;--surface:#2c2c2e;--text-color:#f2f2f7;--text-muted:#a1a1a6;--text-error:#ff6b63;--heading-color:#ff9f6e;--bold-color:#ffab80;--accent-color:#32d74b;--border-color:rgba(255,255,255,.15);--chip:rgba(235,235,245,.14);--mark-bg:rgba(255,214,10,.3);--overlay:rgba(0,0,0,.62)}
+html,body{margin:0;padding:0;background:var(--bg-color)}
+.card{margin:0;padding:0;background:var(--bg-color);color:var(--text-color);text-align:left;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:16px;line-height:1.6;-webkit-text-size-adjust:100%;overflow-wrap:break-word;word-wrap:break-word}
+.echo-anki-container{display:flex;flex-direction:row;min-height:100vh;width:100%;box-sizing:border-box;outline:none}
+.echo-anki-sidebar{position:sticky;top:0;align-self:flex-start;height:100vh;box-sizing:border-box;display:flex;flex-direction:column;flex:0 0 260px;width:260px;padding:20px 16px;border-right:1px solid var(--border-color);background:var(--bg-color)}
+.echo-sidebar-title{font-weight:700;font-size:1.05em;line-height:1.3;color:var(--accent-color);padding-bottom:14px;margin-bottom:14px;border-bottom:1px solid var(--border-color)}
+.echo-btn-eye{display:block;width:100%;box-sizing:border-box;margin:0 0 10px;padding:10px 14px;border:1px solid var(--border-color);border-radius:10px;background:var(--surface);color:var(--text-color);font-family:inherit;font-size:.88em;font-weight:600;line-height:1.2;text-align:center;cursor:pointer;-webkit-appearance:none;appearance:none;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
+.echo-btn-eye:active{opacity:.65}
+@media (hover:hover){.echo-btn-eye:hover{background:var(--chip)}}
+.echo-btn-toc{display:none}
+.echo-toc-wrap,.echo-toc-panel{display:flex;flex-direction:column;flex:1;min-height:0}
+.echo-toc-head{display:none}
+.echo-anki-toc{position:relative;flex:1;min-height:0;overflow-y:auto;font-size:.9em;line-height:1.45;padding-right:4px;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
+.echo-anki-toc ul{list-style:none;margin:0;padding:0}
+.echo-anki-toc li{margin:0;padding:5px 8px;border-radius:7px;color:var(--text-muted)}
+.echo-anki-toc li.l2{padding-left:20px}.echo-anki-toc li.l3{padding-left:32px}.echo-anki-toc li.l4{padding-left:44px}.echo-anki-toc li.l5{padding-left:56px}.echo-anki-toc li.l6{padding-left:68px}
+.echo-anki-toc li.cur{color:var(--accent-color);font-weight:700;background:var(--chip)}
+.echo-anki-content{flex:1;min-width:0;max-width:860px;margin:0 auto;box-sizing:border-box;padding:36px 48px 56px;font-size:1.05em}
+.echo-blanked{padding:40px 20px;border:2px dashed var(--border-color);border-radius:14px;text-align:center;color:var(--text-muted);margin-top:16px;font-style:italic;clear:both}
+.echo-full-note{display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:1000;box-sizing:border-box;padding:3%;background:var(--overlay)}
+.echo-full-note.open{display:flex}
+.echo-fn-box{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--surface);color:var(--text-color);border:1px solid var(--border-color);border-radius:14px;overflow:hidden}
+.echo-fn-bar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 14px;border-bottom:1px solid var(--border-color);font-weight:700}
+.echo-fn-bar .echo-btn-eye{width:auto;margin:0;padding:7px 14px}
+.echo-fn-body{flex:1;overflow-y:auto;padding:24px 32px;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
+h1,h2,h3,h4,h5,h6{color:var(--heading-color);font-weight:650;line-height:1.3;margin:1.4em 0 .5em}
+.echo-anki-content h2.immediate-heading{color:var(--accent-color);text-align:center;margin:0 0 24px;font-size:1.55em;padding-bottom:14px;border-bottom:1px solid var(--border-color)}
+.echo-breadcrumbs{display:block;text-align:center;font-size:.85em;font-weight:600;line-height:1.4;color:var(--text-muted);margin:0 0 10px}
+.echo-bc-sep{color:var(--accent-color);margin:0 6px;font-weight:700}
+strong,b{color:var(--bold-color);font-weight:650}
+em,i{color:var(--accent-color)}
+hr{border:0;border-top:1px solid var(--border-color);margin:24px 0}
+table{display:block;max-width:100%;overflow-x:auto;border-collapse:collapse;margin:14px 0}
+th,td{border:1px solid var(--border-color);padding:8px 10px}
+th{color:var(--accent-color);font-weight:700;background:var(--chip)}
+blockquote{margin:14px 0;padding:8px 14px;border-left:4px solid var(--accent-color);background:var(--chip);border-radius:0 8px 8px 0}
+img,video,svg{max-width:100%;height:auto}
+img{display:block;margin:14px 0;border-radius:10px}
+.nightMode img,.night_mode img{background:rgba(255,255,255,.92)}
+audio{max-width:100%}
+mark{background:var(--mark-bg);color:inherit;padding:1px 4px;border-radius:4px}
+u{text-decoration-color:var(--accent-color);text-underline-offset:3px;text-decoration-thickness:2px}
+code{background:var(--chip);padding:2px 6px;border-radius:5px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.88em}
+pre{background:var(--chip);padding:14px;border-radius:10px;overflow-x:auto;border:1px solid var(--border-color);margin:14px 0}
+pre code{background:transparent;padding:0;border-radius:0;color:inherit}
+ul,ol{padding-left:22px;margin:6px 0}
+ul{list-style-type:disc}ul ul{list-style-type:circle}
+li{margin-bottom:5px}
+li::marker{color:var(--accent-color)}
+mjx-container{max-width:100%;overflow-x:auto;overflow-y:hidden;vertical-align:middle}
+a{color:var(--accent-color)}
+.echo-obsidian-link{display:inline-block;margin-top:28px;color:var(--heading-color);text-decoration:none;font-weight:700;font-size:.9em}
+@media (max-width:900px){.echo-anki-sidebar{flex-basis:220px;width:220px}.echo-anki-content{padding:28px 28px 48px}}
+@media (max-width:600px),(max-height:430px){
+.echo-anki-container{flex-direction:column}
+.echo-anki-sidebar{position:static;align-self:stretch;height:auto;flex:none;width:auto;padding:10px 14px 2px;border-right:0;border-bottom:1px solid var(--border-color);background:transparent;text-align:center}
+.echo-sidebar-title{padding-bottom:8px;margin-bottom:8px;font-size:.98em;line-height:1.3;text-align:center}
+.echo-anki-sidebar .echo-btn-eye{padding:7px 12px;margin-bottom:8px;font-size:.82em}
+.echo-btn-toc{display:block}
+.echo-toc-wrap{display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:1100;flex:none;justify-content:flex-end;background:var(--overlay)}
+.echo-toc-open .echo-toc-wrap{display:flex}
+.echo-toc-panel{flex:none;max-height:80%;box-sizing:border-box;padding:14px 14px 18px;background:var(--surface);border-radius:16px 16px 0 0;overflow:hidden}
+.echo-toc-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;font-weight:700}
+.echo-toc-head .echo-btn-eye{width:auto;margin:0;padding:6px 14px}
+.echo-anki-toc{flex:1 1 auto}
+.echo-anki-content{padding:18px 16px 40px;font-size:1em}
+.echo-anki-content h2.immediate-heading{font-size:1.35em}
+.echo-full-note{padding:0}
+.echo-fn-box{border:0;border-radius:0}
+.echo-fn-body{padding:16px}
+}`;
+
+const ECHO_ANKI_JS = `(function(){
+var d=document,$=function(i){return d.getElementById(i)};
+window.echoSc=function(){var c=$('etoc'),u=c&&c.querySelector('li.cur');if(c&&u&&c.clientHeight)c.scrollTop=Math.max(0,u.offsetTop-(c.clientHeight-u.offsetHeight)/2)};
+window.echoToc=function(o){var e=$('ec');if(!e)return;if(o){e.classList.add('echo-toc-open');window.echoSc()}else e.classList.remove('echo-toc-open')};
+window.echoFn=function(o){var f=$('fn');if(!f)return;if(o){var b=$('fnb');if(b&&!b.firstChild){var t=$('eft');if(t){if(t.content)b.appendChild(t.content.cloneNode(true));else b.innerHTML=t.innerHTML}}f.classList.add('open')}else f.classList.remove('open')};
+if(!window.__echoK){window.__echoK=1;d.addEventListener('keydown',function(e){if(e.key!=='Escape')return;var f=$('fn'),c=$('ec');if(f&&f.classList.contains('open'))window.echoFn(0);else if(c&&c.classList.contains('echo-toc-open'))window.echoToc(0);else return;e.preventDefault();e.stopPropagation()},true)}
+function lv(li){var m=/(^| )l([1-6])( |$)/.exec(li.className);if(m)return +m[2];var ml=parseInt(li.style.marginLeft,10);return isNaN(ml)?1:Math.round(ml/15)+1}
+try{
+var h=d.querySelector('.immediate-heading'),t=$('etoc');
+if(h&&t&&!d.querySelector('.echo-breadcrumbs')){
+var it=t.getElementsByTagName('li'),cur=t.querySelector('li.cur'),ht=h.textContent.trim(),i,j,idx=-1;
+if(!cur&&ht){for(i=0;i<it.length;i++){if(it[i].textContent.trim()===ht){cur=it[i];cur.classList.add('cur');break}}}
+if(cur){
+for(i=0;i<it.length;i++){if(it[i]===cur){idx=i;break}}
+var p=[cur.textContent.trim()],L=lv(cur);
+for(j=idx-1;j>=0&&L>1;j--){var l2=lv(it[j]);if(l2<L){p.unshift(it[j].textContent.trim());L=l2}}
+var b=d.createElement('div');b.className='echo-breadcrumbs';
+for(i=0;i<p.length;i++){if(i){var s=d.createElement('span');s.className='echo-bc-sep';s.textContent='/';b.appendChild(s)}b.appendChild(d.createTextNode(p[i]))}
+h.parentNode.insertBefore(b,h);
+window.echoSc();
+}}
+}catch(err){}
+setTimeout(function(){if(d.body&&d.body.focus)d.body.focus()},50);
+})();`;
+
+function echoCardTemplate(back: boolean): string {
+    const main = back
+        ? `<div>{{Content}}</div>
+                <a class="echo-obsidian-link" href="{{ObsidianURI}}">▶ Open in Obsidian</a>`
+        : ``;
+    return `<div class="echo-anki-container" id="ec" tabindex="0">
+    <div class="echo-anki-sidebar">
+        <div class="echo-sidebar-title">{{NoteTitle}}</div>
+        <button type="button" class="echo-btn-eye echo-btn-toc" onclick="echoToc(1)">☰ TOC</button>
+        <button type="button" class="echo-btn-eye" onclick="echoFn(1)">👁 View Full Note</button>
+        <div class="echo-toc-wrap" onclick="if(event.target===this)echoToc(0)">
+            <div class="echo-toc-panel">
+                <div class="echo-toc-head"><span>Contents</span><button type="button" class="echo-btn-eye" onclick="echoToc(0)">Close</button></div>
+                <div class="echo-anki-toc" id="etoc">{{HeadingPath}}</div>
+            </div>
+        </div>
+    </div>
+    <div class="echo-anki-content">
+        {{#ImmediateHeading}}<h2 class="immediate-heading">{{ImmediateHeading}}</h2>{{/ImmediateHeading}}
+        ${main}
+    </div>
+</div>
+<div id="fn" class="echo-full-note" onclick="if(event.target===this)echoFn(0)">
+    <div class="echo-fn-box">
+        <div class="echo-fn-bar"><span>{{NoteTitle}}</span><button type="button" class="echo-btn-eye" onclick="echoFn(0)">Close</button></div>
+        <div class="echo-fn-body" id="fnb"></div>
+    </div>
+</div>
+<template id="eft">{{FullNote}}</template>
+<script>${ECHO_ANKI_JS}</script>`;
+}
+
+async function setupAnkiNoteType(): Promise<void> {
+    try {
+        const models: string[] = await ankiRequest('modelNames');
+        if (!models.includes(ANKI_MODEL_NAME)) {
+            console.log('[Echo Recall][Anki] Creating note type', ANKI_MODEL_NAME);
+            await ankiRequest('createModel', {
+                modelName: ANKI_MODEL_NAME,
+                inOrderFields: ['ChunkID', 'NoteTitle', 'HeadingPath', 'ImmediateHeading', 'Content', 'FullNote', 'ObsidianURI', '_WARNING'],
+                css: `${ANKI_TPL_MARKER}\n${ECHO_ANKI_CSS}`,
+                isCloze: false,
+                cardTemplates: [{ Name: ANKI_CARD_NAME, Front: echoCardTemplate(false), Back: echoCardTemplate(true) }]
+            });
+            return;
+        }
+        const styling = await ankiRequest('modelStyling', { modelName: ANKI_MODEL_NAME });
+        if (!styling || typeof styling.css !== 'string' || !styling.css.includes(ANKI_TPL_MARKER)) {
+            console.log('[Echo Recall][Anki] Upgrading card template/styling to', ANKI_TPL_MARKER);
+            await ankiRequest('updateModelStyling', { model: { name: ANKI_MODEL_NAME, css: `${ANKI_TPL_MARKER}\n${ECHO_ANKI_CSS}` } });
+            await ankiRequest('updateModelTemplates', {
+                model: { name: ANKI_MODEL_NAME, templates: { [ANKI_CARD_NAME]: { Front: echoCardTemplate(false), Back: echoCardTemplate(true) } } }
+            });
+        }
     } catch (e) {
-        console.error('AnkiConnect Error:', e);
+        console.error('[Echo Recall][Anki] Note type setup/upgrade failed. Is Anki open with AnkiConnect installed?', e);
         throw e;
     }
 }
 
-async function setupAnkiNoteType() {
-    const modelName = 'EchoRecall_v8';
-    try {
-        const models = await ankiRequest('modelNames');
-        if (!models.includes(modelName)) {
-            await ankiRequest('createModel', {
-                modelName,
-                inOrderFields: ['ChunkID', 'NoteTitle', 'HeadingPath', 'ImmediateHeading', 'Content', 'FullNote', 'ObsidianURI', '_WARNING'],
-                css: `
-                    :root {
-                        --bg-color: #262831;
-                        --text-color: #c9cdd2;
-                        --heading-color: #d07353;
-                        --accent-color: #43b569;
-                        --border-color: #3b3e48;
-                        --mark-bg: rgba(219, 153, 40, 0.35);
-                        --modal-bg: #1e1e24;
-                        --bold-color: #d07353;
-                    }
-                    @media (prefers-color-scheme: light) {
-                        :root {
-                            --bg-color: #f4ecd8;
-                            --text-color: #3d3d3d;
-                            --heading-color: #cf6a4c;
-                            --accent-color: #43b569;
-                            --border-color: #dcd3bd;
-                            --mark-bg: rgba(219, 153, 40, 0.25);
-                            --modal-bg: #fdfaf3;
-                            --bold-color: #cf6a4c;
-                        }
-                    }
+interface AnkiNoteInfo { noteId: number; fields: Record<string, { value: string }>; }
+interface AnkiPayload { uid: string; fields: Record<string, string>; }
+interface AnkiUpdateStats { updated: number; refreshed: number; relinked: number; added: number; unchanged: number; orphaned: number; failed: number; notExported: boolean; }
 
-                    html, body { margin: 0; padding: 0; height: auto; min-height: 100vh; background: var(--bg-color); color: var(--text-color); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; overflow-x: hidden; }
-                    .card { text-align: left; background: var(--bg-color); color: var(--text-color); margin: 0; padding: 0; outline: none; }
-                    
-                    .echo-anki-container { display: flex; flex-direction: row; min-height: 100vh; width: 100%; box-sizing: border-box; outline: none; }
-                    
-                    /* Sidebar Layout */
-                    .echo-anki-sidebar { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; flex: 1; min-width: 250px; max-width: 300px; border-right: 1px solid var(--border-color); padding: 20px; box-sizing: border-box; background: rgba(0,0,0,0.05); }
-                    .echo-sidebar-title { font-weight: bold; font-size: 1.15em; color: var(--accent-color); margin-bottom: 15px; padding-bottom: 15px; border-bottom: 1px solid var(--border-color); }
-                    .echo-anki-toc { flex-grow: 1; overflow-y: auto; font-size: 0.9em; color: inherit; line-height: 1.6; margin-bottom: 15px; padding-right: 5px; opacity: 0.85; }
-                    
-                    .echo-anki-content { flex: 3; padding: 35px 50px; line-height: 1.6; font-size: 1.05em; overflow: visible; box-sizing: border-box; min-width: 0; }
-                    
-                    /* Enhanced Button */
-                    .echo-btn-eye { background: var(--bg-color); color: var(--text-color); border: 1px solid var(--border-color); padding: 10px 14px; border-radius: 8px; cursor: pointer; width: 100%; font-weight: 600; font-size: 0.9em; transition: all 0.2s ease; flex-shrink: 0; display: flex; justify-content: center; align-items: center; gap: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); box-sizing: border-box; margin-bottom: 15px; }
-                    .echo-btn-eye:hover { background: var(--border-color); color: var(--text-color); }
-                    
-                    .echo-blanked { padding: 40px; border: 2px dashed var(--border-color); text-align: center; opacity: 0.6; margin-top: 15px; font-style: italic; border-radius: 12px; clear: both; }
-                    
-                    /* Modal */
-                    .echo-full-note { display: none; position: fixed; top: 3%; left: 3%; width: 94%; height: 94%; background: var(--modal-bg); color: var(--text-color); z-index: 1000; overflow-y: auto; padding: 40px; border: 1px solid var(--border-color); box-shadow: 0 10px 40px rgba(0,0,0,0.3); border-radius: 16px; box-sizing: border-box; }
-                    .echo-modal-close { position: fixed; top: 5%; right: 5%; width: auto; background: var(--border-color); padding: 8px 16px; z-index: 1001; }
-                    
-                    /* Rich Markdown Styling based on Obsidian Theme */
-                    h1, h2, h3, h4, h5, h6 { color: var(--heading-color); font-weight: 600; margin-top: 1.5em; margin-bottom: 0.5em; }
-                    .echo-anki-content h2.immediate-heading { color: var(--accent-color); text-align: center; margin-top: 0; margin-bottom: 25px; font-size: 1.6em; border-bottom: 1px solid var(--border-color); padding-bottom: 15px; }
-                    
-                    /* Breadcrumbs CSS (CHANGED TO PURE WHITE) */
-                    .echo-breadcrumbs { display: block; width: 100%; text-align: center; font-size: 0.9em; color: #ffffff; opacity: 1; margin-top: -15px; margin-bottom: 15px; font-weight: 600; line-height: 1.4; }
-
-                    strong { color: var(--bold-color); font-weight: 600; }
-                    em, i { color: var(--accent-color); }
-                    hr { border: none; border-top: 1px solid var(--border-color); margin: 25px 0; }
-                    table { border-collapse: collapse; width: 100%; margin: 15px 0; background: rgba(0,0,0,0.02); }
-                    th, td { border: 1px solid var(--border-color); padding: 10px; }
-                    th { font-weight: bold; color: var(--accent-color); }
-                    blockquote { border-left: 4px solid var(--accent-color); margin: 15px 0; opacity: 0.9; background: rgba(0,0,0,0.03); padding: 10px 15px; border-radius: 0 6px 6px 0; }
-                    img { max-width: 100%; height: auto; border-radius: 8px; display: block; margin: 15px 0; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
-                    mark { background: var(--mark-bg); color: inherit; padding: 2px 4px; border-radius: 4px; }
-                    u { text-decoration-color: var(--accent-color); text-underline-offset: 3px; text-decoration-thickness: 2px; }
-                    code { background: rgba(0,0,0,0.1); padding: 2px 6px; border-radius: 4px; font-family: Consolas, monospace; font-size: 0.9em; }
-                    pre { background: rgba(0,0,0,0.1); padding: 15px; border-radius: 8px; overflow-x: auto; border: 1px solid var(--border-color); margin: 15px 0; }
-                    pre code { background: transparent; padding: 0; color: inherit; border-radius: 0; }
-                    
-                    /* Bullet Indent Lines Removed */
-                    ul { list-style-type: disc; padding-left: 20px; margin: 5px 0; }
-                    ul ul { padding-left: 20px; list-style-type: circle; }
-                    li { margin-bottom: 6px; }
-                    li::marker { color: var(--accent-color); }
-                    
-                    mjx-container { overflow-x: auto; max-width: 100%; display: inline-block; vertical-align: middle; }
-                    .echo-obsidian-link { display: inline-block; margin-top: 30px; color: var(--heading-color); text-decoration: none; font-weight: bold; font-size: 0.9em; }
-                    
-                    @media (max-width: 768px) {
-                        .echo-anki-container { flex-direction: column; }
-                        .echo-anki-sidebar { position: static; height: auto; max-height: 250px; border-right: none; border-bottom: 1px solid var(--border-color); width: 100%; max-width: none; }
-                        .echo-anki-content { padding: 20px; }
-                        .echo-full-note { width: 100%; height: 100%; top: 0; left: 0; border-radius: 0; padding: 20px; }
-                        .echo-modal-close { top: 15px; right: 15px; }
-                    }
-                `,
-                isCloze: false,
-                cardTemplates: [
-                    {
-                        Name: 'Echo Recall Card',
-                        Front: `
-                            <div class="echo-anki-container" tabindex="0" id="main-container">
-                                <div class="echo-anki-sidebar">
-                                    <div class="echo-sidebar-title">{{NoteTitle}}</div>
-                                    <button class="echo-btn-eye" onclick="document.getElementById('fn').style.display='block'">👁 View Full Note</button>
-                                    <div class="echo-anki-toc">{{HeadingPath}}</div>
-                                </div>
-                                <div class="echo-anki-content">
-                                    {{#ImmediateHeading}}<h2 class="immediate-heading">{{ImmediateHeading}}</h2>{{/ImmediateHeading}}
-                                    <div class="echo-blanked">[ Content Hidden - Brainstorm / Recall Now! ]</div>
-                                </div>
-                            </div>
-                            <div id="fn" class="echo-full-note">
-                                <button class="echo-btn-eye echo-modal-close" onclick="document.getElementById('fn').style.display='none'">Close</button>
-                                {{FullNote}}
-                            </div>
-                            <script>
-                                setTimeout(function() { document.body.focus(); }, 50); // Fixes down-arrow scroll
-                                window.addEventListener('keydown', function(e) {
-                                    var fn = document.getElementById('fn');
-                                    if (!fn) return;
-                                    if (e.key === 'Escape' && fn.style.display === 'block') {
-                                        fn.style.display = 'none';
-                                        e.preventDefault();
-                                        e.stopPropagation();
-                                    }
-                                }, true);
-
-                                // FRONT SCRIPT: Calculates Breadcrumb & Smooth Scrolls
-                                setTimeout(function() {
-                                    var toc = document.querySelector('.echo-anki-toc');
-                                    var immediateHeading = document.querySelector('.immediate-heading');
-                                    
-                                    if (toc && immediateHeading) {
-                                        var headingText = immediateHeading.textContent.trim();
-                                        if (!headingText) return;
-
-                                        var allElements = toc.querySelectorAll('*');
-                                        var activeEl = null;
-                                        
-                                        // 1. Find Active Item in TOC
-                                        for (var i = 0; i < allElements.length; i++) {
-                                            var el = allElements[i];
-                                            var clone = el.cloneNode(true);
-                                            // Remove nested lists to get clean text
-                                            var subLists = clone.querySelectorAll('ul, ol, div.children');
-                                            for (var j = 0; j < subLists.length; j++) {
-                                                if (subLists[j].parentNode) subLists[j].parentNode.removeChild(subLists[j]);
-                                            }
-                                            if (clone.textContent.trim() === headingText) {
-                                                activeEl = el;
-                                                break;
-                                            }
-                                        }
-
-                                        if (activeEl) {
-                                            // Make active item green
-                                            activeEl.style.color = "var(--accent-color)";
-                                            activeEl.style.fontWeight = "bold";
-                                            
-                                            // Smooth scroll TOC to this item
-                                            activeEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-
-                                            // 2. Generate Breadcrumbs
-                                            var breadcrumbs = [];
-                                            var currentLi = activeEl.closest('li');
-                                            
-                                            if (currentLi) {
-                                                // Traverse standard list structure
-                                                while (currentLi) {
-                                                    var cloneLi = currentLi.cloneNode(true);
-                                                    var subs = cloneLi.querySelectorAll('ul, ol');
-                                                    for (var k = 0; k < subs.length; k++) {
-                                                        if (subs[k].parentNode) subs[k].parentNode.removeChild(subs[k]);
-                                                    }
-                                                    var text = cloneLi.textContent.trim().replace(/\s+/g, ' ');
-                                                    if (text) breadcrumbs.unshift(text);
-                                                    
-                                                    var parentUl = currentLi.parentElement;
-                                                    currentLi = parentUl ? parentUl.closest('li') : null;
-                                                }
-                                            } 
-                                            
-                                            // Fallback for visual indented structures if lists aren't used
-                                            if (breadcrumbs.length <= 1) {
-                                                breadcrumbs = [];
-                                                var leafItems = [];
-                                                for (var n = 0; n < allElements.length; n++) {
-                                                    if (allElements[n].children.length === 0 && allElements[n].textContent.trim().length > 0) {
-                                                        leafItems.push(allElements[n]);
-                                                    }
-                                                }
-                                                var activeIdx = leafItems.indexOf(activeEl);
-                                                if (activeIdx !== -1) {
-                                                    breadcrumbs.unshift(leafItems[activeIdx].textContent.trim());
-                                                    var currentLeft = leafItems[activeIdx].getBoundingClientRect().left;
-                                                    for (var m = activeIdx - 1; m >= 0; m--) {
-                                                        var prevLeft = leafItems[m].getBoundingClientRect().left;
-                                                        if (prevLeft < currentLeft - 5) { 
-                                                            breadcrumbs.unshift(leafItems[m].textContent.trim());
-                                                            currentLeft = prevLeft;
-                                                        }
-                                                    }
-                                                }
-                                            }
-
-                                            // Insert Breadcrumbs & Save State for Back Card
-                                            if (breadcrumbs.length > 0) {
-                                                var bcHTML = breadcrumbs.join(' <span style="color: var(--accent-color); margin: 0 5px; font-weight: bold;">/</span> ');
-                                                var bcDiv = document.createElement('div');
-                                                bcDiv.className = 'echo-breadcrumbs';
-                                                bcDiv.innerHTML = bcHTML;
-                                                immediateHeading.parentNode.insertBefore(bcDiv, immediateHeading);
-                                                
-                                                // Save to sessionStorage to stop double-processing on Back
-                                                try { sessionStorage.setItem('echo_bc_' + headingText, bcHTML); } catch(e){}
-                                            }
-                                        }
-                                    }
-                                }, 10);
-                            </script>
-                        `,
-                        Back: `
-                            <div class="echo-anki-container" tabindex="0" id="main-container">
-                                <div class="echo-anki-sidebar">
-                                    <div class="echo-sidebar-title">{{NoteTitle}}</div>
-                                    <button class="echo-btn-eye" onclick="document.getElementById('fn').style.display='block'">👁 View Full Note</button>
-                                    <div class="echo-anki-toc">{{HeadingPath}}</div>
-                                </div>
-                                <div class="echo-anki-content">
-                                    {{#ImmediateHeading}}<h2 class="immediate-heading">{{ImmediateHeading}}</h2>{{/ImmediateHeading}}
-                                    <div>{{Content}}</div>
-                                    <a class="echo-obsidian-link" href="{{ObsidianURI}}">▶ Open in Obsidian</a>
-                                </div>
-                            </div>
-                            <div id="fn" class="echo-full-note">
-                                <button class="echo-btn-eye echo-modal-close" onclick="document.getElementById('fn').style.display='none'">Close</button>
-                                {{FullNote}}
-                            </div>
-                            <script>
-                                setTimeout(function() { document.body.focus(); }, 50); // Fixes down-arrow scroll
-                                window.addEventListener('keydown', function(e) {
-                                    var fn = document.getElementById('fn');
-                                    if (!fn) return;
-                                    if (e.key === 'Escape' && fn.style.display === 'block') {
-                                        fn.style.display = 'none';
-                                        e.preventDefault();
-                                        e.stopPropagation();
-                                    }
-                                }, true);
-
-                                // BACK SCRIPT: Instant alignment (No Slide) & Retrieves saved Breadcrumb
-                                setTimeout(function() {
-                                    var toc = document.querySelector('.echo-anki-toc');
-                                    var immediateHeading = document.querySelector('.immediate-heading');
-                                    
-                                    if (toc && immediateHeading) {
-                                        var headingText = immediateHeading.textContent.trim();
-                                        if (!headingText) return;
-
-                                        var allElements = toc.querySelectorAll('*');
-                                        var activeEl = null;
-                                        
-                                        for (var i = 0; i < allElements.length; i++) {
-                                            var el = allElements[i];
-                                            var clone = el.cloneNode(true);
-                                            var subLists = clone.querySelectorAll('ul, ol, div.children');
-                                            for (var j = 0; j < subLists.length; j++) {
-                                                if (subLists[j].parentNode) subLists[j].parentNode.removeChild(subLists[j]);
-                                            }
-                                            if (clone.textContent.trim() === headingText) {
-                                                activeEl = el;
-                                                break;
-                                            }
-                                        }
-
-                                        if (activeEl) {
-                                            activeEl.style.color = "var(--accent-color)";
-                                            activeEl.style.fontWeight = "bold";
-                                            // INSTANT jump (No animation) so user doesn't see it shift on flip
-                                            activeEl.scrollIntoView({ block: 'center' });
-                                        }
-
-                                        // Fetch Breadcrumb instantly from memory
-                                        var cachedBc = null;
-                                        try { cachedBc = sessionStorage.getItem('echo_bc_' + headingText); } catch(e){}
-                                        
-                                        if (cachedBc) {
-                                            var bcDiv = document.createElement('div');
-                                            bcDiv.className = 'echo-breadcrumbs';
-                                            bcDiv.innerHTML = cachedBc;
-                                            immediateHeading.parentNode.insertBefore(bcDiv, immediateHeading);
-                                        }
-                                    }
-                                }, 10);
-                            </script>
-                        `
-                    }
-                ]
-            });
-        }
-    } catch (e) {
-        console.warn("AnkiConnect not detected or failed to set up Note Type.");
-    }
+function escHtml(s: string): string {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-async function processHtmlMedia(app: App, file: TFile, component: Component, markdown: string, ankiSync: boolean = false, depth: number = 0, mediaCache: Set<string> = new Set(), noteCache: Map<string, string> = new Map()): Promise<string> {
-    if (depth > 3) return "<span style='color:var(--text-error); font-size:0.8em;'>[Link depth limit reached]</span>";
+function extractTocLines(body: string): { level: number, text: string }[] {
+    const out: { level: number, text: string }[] = [];
+    for (const l of body.split('\n')) {
+        const m = l.match(/^(#{1,6})\s+(.*)/);
+        if (m) out.push({ level: m[1].length, text: m[2].replace(/\*/g, '').trim() });
+    }
+    return out;
+}
+
+function buildLocalToc(lines: { level: number, text: string }[], immediateHeading: string): string {
+    if (!lines.length) return '<i>Full Note / Paragraph</i>';
+    let marked = false;
+    let html = '<ul>';
+    for (const h of lines) {
+        const cur = !marked && immediateHeading !== '' && immediateHeading === h.text;
+        if (cur) marked = true;
+        html += `<li class="l${h.level}${cur ? ' cur' : ''}">${escHtml(h.text)}</li>`;
+    }
+    return html + '</ul>';
+}
+
+function ankiFilePrefix(file: TFile): string {
+    return `echo_${stringToHash(file.path)}_`;
+}
+
+function computeChunkUids(file: TFile, chunks: ChunkData[]): string[] {
+    const seen = new Map<string, number>();
+    return chunks.map(c => {
+        const base = `${ankiFilePrefix(file)}${stringToHash(c.headingText || c.content.substring(0, 50))}`;
+        const n = (seen.get(base) || 0) + 1;
+        seen.set(base, n);
+        return n === 1 ? base : `${base}_${n}`;
+    });
+}
+
+function ankiField(n: AnkiNoteInfo, key: string): string {
+    return (n.fields && n.fields[key] && typeof n.fields[key].value === 'string') ? n.fields[key].value : '';
+}
+
+function textTokens(html: string): Set<string> {
+    return new Set(html.replace(/<[^>]*>/g, ' ').toLowerCase().split(/\s+/).filter(w => w.length > 2));
+}
+
+function jaccard(a: Set<string>, b: Set<string>): number {
+    if (!a.size && !b.size) return 1;
+    let inter = 0;
+    a.forEach(x => { if (b.has(x)) inter++; });
+    return inter / (a.size + b.size - inter);
+}
+
+const ankiSleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
+
+async function findAnkiNotes(query: string, keep?: (n: AnkiNoteInfo) => boolean): Promise<AnkiNoteInfo[]> {
+    const ids: number[] = await ankiRequest('findNotes', { query });
+    const out: AnkiNoteInfo[] = [];
+    for (let i = 0; i < ids.length; i += 40) {
+        const infos: AnkiNoteInfo[] = await ankiRequest('notesInfo', { notes: ids.slice(i, i + 40) });
+        for (const n of infos) if (n && n.noteId && (!keep || keep(n))) out.push(n);
+    }
+    return out;
+}
+
+function logAnkiError(context: string, e: any, extra: Record<string, any> = {}) {
+    console.error(`[Echo Recall] ${context} FAILED`, {
+        message: e && e.message ? e.message : String(e),
+        stack: e && e.stack ? e.stack : undefined,
+        ...extra
+    });
+}
+
+async function processHtmlMedia(app: App, file: TFile, component: Component, markdown: string, ankiSync: boolean = false, depth: number = 0, mediaCache: Set<string> = new Set(), noteCache: Map<string, string> = new Map(), visiting: Set<string> = new Set()): Promise<string> {
+    if (depth > 6) return "<span style='color:var(--text-error); font-size:0.8em;'>[Link depth limit reached]</span>";
+
+    const myVisiting = new Set(visiting);
+    myVisiting.add(file.path);
 
     let processed = markdown;
     const placeholders: Record<string, string> = {};
@@ -639,18 +616,37 @@ async function processHtmlMedia(app: App, file: TFile, component: Component, mar
 
     if (ankiSync) {
         // 1. Process Media BEFORE rendering
-        const wikiRegex = /!\[\[([^\]|]+)(?:\|([^\]]*))?\]\]/g;
-        const mdRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
+        const wikiRegex = /!\[\[([^\]|]+?)\\?(?:\|([^\]]*))?\]\]/g;
+        const mdRegex = /!\[([^\]]*)\]\((<[^>]+>|[^)]+)\)/g;
 
         const replaceMedia = async (match: string, filename: string, sizeOrAlt: string) => {
-            const destFile = app.metadataCache.getFirstLinkpathDest(decodeURIComponent(filename), file.path);
-            if (destFile instanceof TFile && ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'mp3', 'mp4'].includes(destFile.extension)) {
+            const clean = filename.trim().replace(/^<|>$/g, '').replace(/\\$/, '').split('#')[0].trim();
+            if (/^(https?:|data:)/i.test(clean)) return match;
+            let decoded = clean;
+            try { decoded = decodeURIComponent(clean); } catch (_) { /* literal % in filename */ }
+            const destFile = app.metadataCache.getFirstLinkpathDest(decoded, file.path) || app.metadataCache.getFirstLinkpathDest(clean, file.path);
+            const mkPlaceholder = (html: string) => {
+                const pid = `ECHOMODALPLACEHOLDER${placeholderCounter}END`;
+                placeholderCounter++;
+                placeholders[pid] = html;
+                return pid;
+            };
+            if (!(destFile instanceof TFile) && /\.(png|jpe?g|gif|webp|svg|bmp|avif|mp3|wav|ogg|m4a|flac|mp4|webm)$/i.test(clean)) {
+                console.warn(`[Echo Recall] Media not found in vault, referenced from ${file.path}: ${clean}`);
+                return mkPlaceholder(`<span style="opacity:0.6;font-size:0.85em">[Image not found: ${escHtml(clean)}]</span>`);
+            }
+            if (destFile instanceof TFile && ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'avif', 'mp3', 'wav', 'ogg', 'm4a', 'flac', 'mp4', 'webm'].includes(destFile.extension.toLowerCase())) {
                 const ankiFilename = `echo_${stringToHash(destFile.path)}_${destFile.name}`;
                 if (!mediaCache.has(ankiFilename)) {
-                    const arr = await app.vault.readBinary(destFile);
-                    const b64 = arrayBufferToBase64(arr);
-                    await ankiRequest('storeMediaFile', { filename: ankiFilename, data: b64 });
-                    mediaCache.add(ankiFilename);
+                    try {
+                        const arr = await app.vault.readBinary(destFile);
+                        const b64 = arrayBufferToBase64(arr);
+                        await ankiRequest('storeMediaFile', { filename: ankiFilename, data: b64 });
+                        mediaCache.add(ankiFilename);
+                    } catch (me) {
+                        console.error(`[Echo Recall] Failed to upload media "${destFile.path}" (${destFile.stat ? destFile.stat.size : '?'} bytes) to Anki`, me);
+                        return mkPlaceholder(`<span style="opacity:0.6;font-size:0.85em">[Image failed to upload: ${escHtml(destFile.name)}]</span>`);
+                    }
                 }
                 
                 let widthAttr = "";
@@ -663,10 +659,13 @@ async function processHtmlMedia(app: App, file: TFile, component: Component, mar
                     }
                 }
                 const imgHtml = `<img src="${ankiFilename}" ${widthAttr} style="max-width: 100%; height: auto; border-radius: 8px; margin: 10px 0; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">`;
-                const pid = `ECHOMODALPLACEHOLDER${placeholderCounter}END`;
-                placeholderCounter++;
-                placeholders[pid] = imgHtml;
-                return pid;
+                const ext = destFile.extension.toLowerCase();
+                const mediaHtml = ['mp3', 'wav', 'ogg', 'm4a', 'flac'].includes(ext)
+                    ? `<audio controls src="${ankiFilename}"></audio>`
+                    : ['mp4', 'webm'].includes(ext)
+                        ? `<video controls src="${ankiFilename}" style="max-width:100%"></video>`
+                        : imgHtml;
+                return mkPlaceholder(mediaHtml);
             }
             return match;
         };
@@ -684,7 +683,7 @@ async function processHtmlMedia(app: App, file: TFile, component: Component, mar
         
         for (const m of linkMatches) {
             const isEmbed = m[1] === '!';
-            const linkTarget = m[2].trim();
+            const linkTarget = m[2].trim().replace(/\\$/, '');
             const displayText = m[3] ? m[3].trim() : linkTarget;
             
             if (linkTarget.match(/\.(png|jpg|jpeg|gif|webp|svg|mp3|mp4)$/i)) continue;
@@ -693,8 +692,10 @@ async function processHtmlMedia(app: App, file: TFile, component: Component, mar
             
             if (destFile instanceof TFile && destFile.extension === 'md') {
                 let linkedNoteHtml = "";
-                if (noteCache.has(destFile.path)) {
-                    linkedNoteHtml = noteCache.get(destFile.path);
+                if (myVisiting.has(destFile.path)) {
+                    linkedNoteHtml = `<em style="opacity:0.6">[Circular link to "${displayText}" — not expanded to avoid a loop]</em>`;
+                } else if (noteCache.has(destFile.path)) {
+                    linkedNoteHtml = noteCache.get(destFile.path) as string;
                 } else {
                     const noteContent = await app.vault.read(destFile);
                     let cleanContent = noteContent;
@@ -702,7 +703,7 @@ async function processHtmlMedia(app: App, file: TFile, component: Component, mar
                     const cleanContentMatch = noteContent.match(/^---\n[\s\S]*?\n---\n/);
                     if (cleanContentMatch) cleanContent = noteContent.slice(cleanContentMatch[0].length);
                     
-                    linkedNoteHtml = await processHtmlMedia(app, destFile, component, cleanContent.trim(), true, depth + 1, mediaCache, noteCache);
+                    linkedNoteHtml = await processHtmlMedia(app, destFile, component, cleanContent.trim(), true, depth + 1, mediaCache, noteCache, myVisiting);
                     noteCache.set(destFile.path, linkedNoteHtml);
                 }
                 
@@ -713,7 +714,7 @@ async function processHtmlMedia(app: App, file: TFile, component: Component, mar
                     placeholders[pid] = `<div style="border-left: 4px solid var(--accent-color, #43b569); padding: 15px 20px; margin: 15px 0; background: rgba(0,0,0,0.03); border-radius: 0 8px 8px 0;"><strong>${displayText}</strong><hr style="margin: 10px 0; opacity:0.5;">${linkedNoteHtml}</div>`;
                 } else {
                     const modalId = 'modal_' + stringToHash(destFile.path + Math.random().toString());
-                    placeholders[pid] = `<span onclick="document.getElementById('${modalId}').style.display='flex'; event.preventDefault(); event.stopPropagation();" style="color:var(--accent-color, #43b569); cursor:pointer; font-weight:bold; border-bottom: 1.5px dashed var(--accent-color, #43b569); transition: opacity 0.2s;">&#91;&#91;${displayText}&#93;&#93;</span><div id="${modalId}" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.65); z-index:99999; justify-content:center; align-items:center; backdrop-filter: blur(4px);" onclick="this.style.display='none'; event.preventDefault(); event.stopPropagation();"><div style="background:var(--bg-color, #262831); color:var(--text-color, #c9cdd2); padding:35px 45px; border-radius:12px; width:85%; max-width:850px; max-height:85%; overflow-y:auto; border:1px solid var(--border-color, #3b3e48); box-shadow: 0 15px 50px rgba(0,0,0,0.5); text-align: left; position: relative; cursor:default;" onclick="event.stopPropagation()"><div style="font-weight:bold; font-size:1.4em; color:var(--heading-color, #d07353); margin-bottom:20px; border-bottom:1px solid var(--border-color, #3b3e48); padding-bottom:15px; display:flex; justify-content:space-between; align-items:center;"><span>🔗 ${displayText}</span><span onclick="document.getElementById('${modalId}').style.display='none'; event.stopPropagation();" style="cursor:pointer; color:var(--text-muted, #888); font-size: 1.2em; padding: 5px; background: rgba(0,0,0,0.1); border-radius: 6px; width:30px; height:30px; display:flex; align-items:center; justify-content:center;">✖</span></div><div style="font-size: 1em; line-height: 1.6;">${linkedNoteHtml}</div></div></div>`;
+                    placeholders[pid] = `<span onclick="var m=document.getElementById('${modalId}'); if(m.parentNode!==document.body)document.body.appendChild(m); m.style.display='flex'; event.preventDefault(); event.stopPropagation();" style="color:var(--accent-color, #43b569); cursor:pointer; font-weight:bold; border-bottom: 1.5px dashed var(--accent-color, #43b569); transition: opacity 0.2s;">&#91;&#91;${displayText}&#93;&#93;</span><div id="${modalId}" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.65); z-index:99999; justify-content:center; align-items:center; -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px);" onclick="this.style.display='none'; event.preventDefault(); event.stopPropagation();"><div style="background:var(--bg-color, #262831); color:var(--text-color, #c9cdd2); padding:35px 45px; border-radius:12px; width:85%; max-width:850px; max-height:85%; overflow-y:auto; border:1px solid var(--border-color, #3b3e48); box-shadow: 0 15px 50px rgba(0,0,0,0.5); text-align: left; position: relative; cursor:default; overscroll-behavior: contain; -webkit-overflow-scrolling: touch;" onclick="event.stopPropagation()"><div style="font-weight:bold; font-size:1.4em; color:var(--heading-color, #d07353); margin-bottom:20px; border-bottom:1px solid var(--border-color, #3b3e48); padding-bottom:15px; display:flex; justify-content:space-between; align-items:center;"><span>🔗 ${displayText}</span><span onclick="document.getElementById('${modalId}').style.display='none'; event.stopPropagation();" style="cursor:pointer; color:var(--text-muted, #888); font-size: 1.2em; padding: 5px; background: rgba(0,0,0,0.1); border-radius: 6px; width:30px; height:30px; display:flex; align-items:center; justify-content:center;">✖</span></div><div style="font-size: 1em; line-height: 1.6;">${linkedNoteHtml}</div></div></div>`;
                 }
                 processed = processed.replace(m[0], pid);
             }
@@ -1722,6 +1723,7 @@ class DashboardItemView extends ItemView {
 
 export default class EchoRecallPlugin extends Plugin {
     settings: EchoRecallSettings;
+    ankiBusy = false;
 
     async onload() {
         await this.loadSettings();
@@ -1751,7 +1753,7 @@ export default class EchoRecallPlugin extends Plugin {
 
         this.app.workspace.onLayoutReady(() => {
             this.injectHeaderButtons();
-            setupAnkiNoteType();
+            setupAnkiNoteType().catch(() => { /* already logged; Anki may simply be closed */ });
         });
         this.registerEvent(this.app.workspace.on('layout-change', () => this.injectHeaderButtons()));
         this.registerEvent(this.app.workspace.on('file-open', () => this.injectHeaderButtons()));
@@ -1790,6 +1792,11 @@ export default class EchoRecallPlugin extends Plugin {
                 if (f) this.updateAnkiCards(f);
             }
         });
+
+        this.addCommand({
+            id: 'echo-recall-update-anki-all', name: 'Differential update ALL exported notes in Anki',
+            callback: () => this.updateAllAnkiCards()
+        });
     }
 
     // --- ANKI EXPORT LOGIC ---
@@ -1805,169 +1812,257 @@ export default class EchoRecallPlugin extends Plugin {
         }
     }
 
+    async prepareAnkiPayloads(file: TFile, body: string, onProgress: (m: string) => void): Promise<AnkiPayload[]> {
+        const chunks = generateChunks(body, this.settings.chunkMode);
+        const mediaCache = await seedExistingAnkiMedia();
+        const noteCache = new Map<string, string>();
+        onProgress('Echo Recall: Processing full note media...');
+        console.log(`[Echo Recall] Processing full note HTML and media for ${file.path}...`);
+        const fullNoteHtml = await processHtmlMedia(this.app, file, this, body, true, 0, mediaCache, noteCache);
+        const obsidianUri = `obsidian://open?vault=${encodeURIComponent(this.app.vault.getName())}&file=${encodeURIComponent(file.path)}`;
+        const toc = extractTocLines(body);
+        const uids = computeChunkUids(file, chunks);
+        const out: AnkiPayload[] = [];
+        for (let i = 0; i < chunks.length; i++) {
+            const chunk = chunks[i];
+            onProgress(`Echo Recall: Processing chunk ${i + 1} of ${chunks.length}...`);
+            console.log(`[Echo Recall] Processing chunk ${i + 1}/${chunks.length} (${uids[i]})...`);
+            out.push({
+                uid: uids[i],
+                fields: {
+                    ChunkID: uids[i],
+                    NoteTitle: file.basename,
+                    HeadingPath: buildLocalToc(toc, chunk.immediateHeading),
+                    ImmediateHeading: escHtml(chunk.immediateHeading),
+                    Content: await processHtmlMedia(this.app, file, this, chunk.content, true, 0, mediaCache, noteCache),
+                    FullNote: fullNoteHtml,
+                    ObsidianURI: obsidianUri,
+                    _WARNING: 'DO NOT EDIT IN ANKI. Obsidian is the source of truth.'
+                }
+            });
+        }
+        return out;
+    }
+
+    async addAnkiPayloads(payloads: AnkiPayload[], deckName: string, setMsg: (m: string) => void): Promise<{ added: number, skipped: number }> {
+        const tags = this.settings.ankiTags.split(',').map(t => t.trim()).filter(Boolean);
+        const notes = payloads.map(p => ({ deckName, modelName: ANKI_MODEL_NAME, fields: p.fields, tags, options: { allowDuplicate: false } }));
+        let added = 0, skipped = 0;
+        const BATCH_SIZE = 5;
+        for (let i = 0; i < notes.length; i += BATCH_SIZE) {
+            const batch = notes.slice(i, i + BATCH_SIZE);
+            setMsg(`Echo Recall: Sending notes ${i + 1} to ${Math.min(i + BATCH_SIZE, notes.length)} of ${notes.length}...`);
+            try {
+                const results = await ankiRequest('addNotes', { notes: batch });
+                results.forEach((r: any) => r === null ? skipped++ : added++);
+            } catch (batchErr) {
+                logAnkiError(`addNotes batch ${Math.floor(i / BATCH_SIZE) + 1}`, batchErr, { deckName, chunkIds: batch.map(b => b.fields.ChunkID) });
+                throw batchErr;
+            }
+            await ankiSleep(250);
+        }
+        return { added, skipped };
+    }
+
     async exportNoteToAnki(file: TFile) {
-        let exportNotice = new Notice('Echo Recall: Initializing Anki export...', 0);
-        console.log(`[Echo Recall] Starting export for: ${file.basename}`);
+        if (this.ankiBusy) { new Notice('Echo Recall: an Anki export/update is already running.'); return; }
+        this.ankiBusy = true;
+        const exportNotice = new Notice('Echo Recall: Initializing Anki export...', 0);
+        const setMsg = (m: string) => { exportNotice.noticeEl.innerText = m; };
+        console.log(`[Echo Recall] Starting export for: ${file.path}`);
         try {
             await this.createDeckIfNeeded();
-            const rawText = await this.app.vault.read(file);
-            const { body } = extractFrontmatter(rawText);
-            const chunks = generateChunks(body, this.settings.chunkMode);
-            const mediaCache = new Set<string>();
-            const noteCache = new Map<string, string>();
-            
-            exportNotice.noticeEl.innerText = `Echo Recall: Processing full note media...`;
-            console.log(`[Echo Recall] Processing full note HTML and media cache...`);
-            const fullNoteHtml = await processHtmlMedia(this.app, file, this, body, true, 0, mediaCache, noteCache);
-            const obsidianUri = `obsidian://open?vault=${encodeURIComponent(this.app.vault.getName())}&file=${encodeURIComponent(file.path)}`;
-
-            const fullTocLines: {level: number, text: string, raw: string}[] = [];
-            const rawLines = body.split('\n');
-            for (const l of rawLines) {
-                const m = l.match(/^(#{1,6})\s+(.*)/);
-                if (m) fullTocLines.push({ level: m[1].length, text: m[2].replace(/\*/g,'').trim(), raw: l });
-            }
-
-            const notes = [];
-            let currentChunk = 0;
-            for (const chunk of chunks) {
-                currentChunk++;
-                exportNotice.noticeEl.innerText = `Echo Recall: Processing chunk ${currentChunk} of ${chunks.length}...`;
-                console.log(`[Echo Recall] Processing chunk ${currentChunk}/${chunks.length}...`);
-                const uid = `echo_${stringToHash(file.path)}_${stringToHash(chunk.headingText || chunk.content.substring(0, 50))}`;
-                
-                let localToc = '<ul style="list-style-type:none; padding-left:0; margin:0;">';
-                for (const h of fullTocLines) {
-                    const padding = (h.level - 1) * 15;
-                    const isCurrent = (chunk.immediateHeading === h.text);
-                    localToc += `<li style="margin-left:${padding}px; padding: 4px 0; line-height: 1.4; ${isCurrent ? 'color:#43b569; font-weight:bold;' : 'color:#888;'}">${h.text}</li>`;
-                }
-                localToc += '</ul>';
-
-                notes.push({
-                    deckName: this.settings.ankiDeckName,
-                    modelName: 'EchoRecall_v8',
-                    fields: {
-                        ChunkID: uid,
-                        NoteTitle: file.basename,
-                        HeadingPath: localToc || '<i>Full Note / Paragraph</i>',
-                        ImmediateHeading: chunk.immediateHeading,
-                        Content: await processHtmlMedia(this.app, file, this, chunk.content, true, 0, mediaCache, noteCache),
-                        FullNote: fullNoteHtml,
-                        ObsidianURI: obsidianUri,
-                        _WARNING: 'DO NOT EDIT IN ANKI. Obsidian is the source of truth.'
-                    },
-                    tags: this.settings.ankiTags.split(',').map(t => t.trim()),
-                    options: { allowDuplicate: false }
-                });
-            }
-
-            exportNotice.noticeEl.innerText = `Echo Recall: Sending ${notes.length} notes to Anki in batches...`;
-            console.log(`[Echo Recall] Sending ${notes.length} notes to Anki in batches of 5 to prevent Anki from freezing...`);
-            let added = 0; let skipped = 0;
-            const BATCH_SIZE = 5;
-            for (let i = 0; i < notes.length; i += BATCH_SIZE) {
-                const batch = notes.slice(i, i + BATCH_SIZE);
-                exportNotice.noticeEl.innerText = `Echo Recall: Sending notes ${i + 1} to ${Math.min(i + BATCH_SIZE, notes.length)} of ${notes.length}...`;
-                console.log(`[Echo Recall] Sending batch ${Math.floor(i / BATCH_SIZE) + 1} (notes ${i + 1}-${Math.min(i + BATCH_SIZE, notes.length)})...`);
-                
-                try {
-                    const results = await ankiRequest('addNotes', { notes: batch });
-                    results.forEach((r: any) => r === null ? skipped++ : added++);
-                } catch (batchErr) {
-                    console.error(`[Echo Recall] Batch ${Math.floor(i / BATCH_SIZE) + 1} failed:`, batchErr);
-                    throw batchErr; 
-                }
-                
-                // 250ms sleep to let Anki's local Python HTTP server breathe
-                await new Promise(resolve => setTimeout(resolve, 250));
-            }
-            
+            await setupAnkiNoteType();
+            const { body } = extractFrontmatter(await this.app.vault.read(file));
+            const payloads = await this.prepareAnkiPayloads(file, body, setMsg);
+            setMsg(`Echo Recall: Sending ${payloads.length} notes to Anki in batches...`);
+            const { added, skipped } = await this.addAnkiPayloads(payloads, this.settings.ankiDeckName, setMsg);
             exportNotice.hide();
             new Notice(`Anki Export Complete: ${added} added, ${skipped} skipped.`);
             console.log(`[Echo Recall] Export Complete. ${added} added, ${skipped} skipped.`);
             if (skipped > 0) new Notice("Skipped cards might already exist. Try the Update command.");
-
         } catch (e) {
-            console.error("[Echo Recall] Anki export failed:", e);
-            if (typeof exportNotice !== 'undefined') exportNotice.hide();
+            logAnkiError('Anki export', e, { file: file.path });
+            exportNotice.hide();
             new Notice('Anki export failed. Check console for details.', 5000);
+        } finally {
+            this.ankiBusy = false;
         }
     }
 
-    async updateAnkiCards(file: TFile) {
-        let updateNotice = new Notice('Echo Recall: Initializing Anki update...', 0);
-        console.log(`[Echo Recall] Starting update for: ${file.basename}`);
-        try {
-            const rawText = await this.app.vault.read(file);
-            const { body } = extractFrontmatter(rawText);
-            const chunks = generateChunks(body, this.settings.chunkMode);
-            const mediaCache = new Set<string>();
-            const noteCache = new Map<string, string>();
-            
-            updateNotice.noticeEl.innerText = `Echo Recall: Fetching updated full note...`;
-            const fullNoteHtml = await processHtmlMedia(this.app, file, this, body, true, 0, mediaCache, noteCache);
-            
-            const fullTocLines: {level: number, text: string, raw: string}[] = [];
-            const rawLines = body.split('\n');
-            for (const l of rawLines) {
-                const m = l.match(/^(#{1,6})\s+(.*)/);
-                if (m) fullTocLines.push({ level: m[1].length, text: m[2].replace(/\*/g,'').trim(), raw: l });
+    async runAnkiUpdate(file: TFile, setMsg: (m: string) => void): Promise<AnkiUpdateStats> {
+        const stats: AnkiUpdateStats = { updated: 0, refreshed: 0, relinked: 0, added: 0, unchanged: 0, orphaned: 0, failed: 0, notExported: false };
+        const tag = `[Echo Recall][Update][${file.path}]`;
+        await setupAnkiNoteType();
+        const { body } = extractFrontmatter(await this.app.vault.read(file));
+        const payloads = await this.prepareAnkiPayloads(file, body, setMsg);
+
+        setMsg(`Echo Recall: Searching all of Anki for "${file.basename}" cards...`);
+        const prefix = ankiFilePrefix(file);
+        const encPath = encodeURIComponent(file.path);
+        const existing = await findAnkiNotes(`"ChunkID:${prefix.replace(/_/g, '\\_')}*"`, n => {
+            if (!ankiField(n, 'ChunkID').startsWith(prefix)) return false;
+            const uri = ankiField(n, 'ObsidianURI');
+            return !uri || uri.includes(encPath);
+        });
+        if (!existing.length) {
+            stats.notExported = true;
+            console.warn(`${tag} No Anki notes found for this file. Export it first.`);
+            return stats;
+        }
+
+        const byUid = new Map<string, AnkiNoteInfo>();
+        for (const n of existing) {
+            const id = ankiField(n, 'ChunkID');
+            if (byUid.has(id)) console.warn(`${tag} Duplicate ChunkID ${id} (note ${n.noteId}) ignored; keeping note ${byUid.get(id)!.noteId}.`);
+            else byUid.set(id, n);
+        }
+        const wanted = new Set(payloads.map(p => p.uid));
+        const pool: AnkiNoteInfo[] = Array.from(byUid.entries()).filter(e => !wanted.has(e[0])).map(e => e[1]);
+        const pairs: { note: AnkiNoteInfo, payload: AnkiPayload, relink: boolean }[] = [];
+        const fresh: AnkiPayload[] = [];
+        for (const p of payloads) {
+            const n = byUid.get(p.uid);
+            if (n) pairs.push({ note: n, payload: p, relink: false });
+            else fresh.push(p);
+        }
+
+        // Chunks whose ID changed (heading renamed / first words edited): relink to the closest orphaned card so scheduling is kept.
+        const tokCache = new Map<number, Set<string>>();
+        const tokOf = (n: AnkiNoteInfo) => { let t = tokCache.get(n.noteId); if (!t) { t = textTokens(ankiField(n, 'Content')); tokCache.set(n.noteId, t); } return t; };
+        const brandNew: AnkiPayload[] = [];
+        for (const p of fresh) {
+            const pc = p.fields.Content.trim();
+            let idx = pool.findIndex(o => ankiField(o, 'Content').trim() === pc);
+            if (idx < 0) {
+                const pt = textTokens(pc);
+                let best = -1, bestScore = 0.499;
+                pool.forEach((o, i) => { const s = jaccard(pt, tokOf(o)); if (s > bestScore) { bestScore = s; best = i; } });
+                idx = best;
             }
+            if (idx >= 0) { pairs.push({ note: pool[idx], payload: p, relink: true }); pool.splice(idx, 1); }
+            else brandNew.push(p);
+        }
 
-            let updatedCount = 0;
-            let currentChunk = 0;
+        const keys = ['ChunkID', 'NoteTitle', 'HeadingPath', 'ImmediateHeading', 'Content', 'FullNote', 'ObsidianURI'];
+        let n = 0;
+        for (const { note, payload, relink } of pairs) {
+            n++;
+            setMsg(`Echo Recall: Updating card ${n} of ${pairs.length}...`);
+            const changed: Record<string, string> = {};
+            for (const k of keys) if (payload.fields[k] !== ankiField(note, k)) changed[k] = payload.fields[k];
+            if (!Object.keys(changed).length) { stats.unchanged++; continue; }
+            const contentChanged = 'Content' in changed && changed.Content.trim() !== ankiField(note, 'Content').trim();
+            try {
+                await ankiRequest('updateNoteFields', { note: { id: note.noteId, fields: changed } });
+                if (contentChanged) {
+                    try {
+                        const cards: number[] = await ankiRequest('findCards', { query: `nid:${note.noteId}` });
+                        if (cards.length > 0) await ankiRequest('forgetCards', { cards });
+                    } catch (re) { logAnkiError(`${tag} resetting cards of note ${note.noteId}`, re); }
+                    stats.updated++;
+                } else stats.refreshed++;
+                if (relink) { stats.relinked++; console.log(`${tag} Relinked note ${note.noteId} -> ${payload.uid}`); }
+            } catch (ue) {
+                stats.failed++;
+                logAnkiError(`${tag} updateNoteFields note ${note.noteId}`, ue, { chunkId: payload.uid, changedFields: Object.keys(changed) });
+            }
+            await ankiSleep(30);
+        }
 
-            for (const chunk of chunks) {
-                currentChunk++;
-                updateNotice.noticeEl.innerText = `Echo Recall: Checking Anki for chunk ${currentChunk} of ${chunks.length}...`;
-                const uid = `echo_${stringToHash(file.path)}_${stringToHash(chunk.headingText || chunk.content.substring(0, 50))}`;
-                const foundIds = await ankiRequest('findNotes', { query: `ChunkID:"${uid}"` });
-                
-                if (foundIds.length > 0) {
-                    const newContentHtml = await processHtmlMedia(this.app, file, this, chunk.content, true, 0, mediaCache, noteCache);
-                    const noteInfo = await ankiRequest('notesInfo', { notes: foundIds });
-                    
-                    let localToc = '<ul>';
-                    for (const h of fullTocLines) {
-                        const padding = (h.level - 1) * 15;
-                        const isCurrent = (chunk.immediateHeading === h.text);
-                        localToc += `<li style="margin-left:${padding}px; ${isCurrent ? 'color:#43b569; font-weight:bold;' : 'color:#888;'}">${h.text}</li>`;
-                    }
-                    localToc += '</ul>';
+        if (brandNew.length) {
+            let deck = this.settings.ankiDeckName;
+            try {
+                const cards: number[] = await ankiRequest('findCards', { query: `nid:${existing[0].noteId}` });
+                if (cards.length) {
+                    const info = await ankiRequest('cardsInfo', { cards: [cards[0]] });
+                    if (info && info[0] && info[0].deckName) deck = info[0].deckName;
+                }
+            } catch (de) { logAnkiError(`${tag} resolving sibling deck (falling back to "${deck}")`, de); }
+            try {
+                await ankiRequest('createDeck', { deck });
+                const r = await this.addAnkiPayloads(brandNew, deck, setMsg);
+                stats.added += r.added;
+                if (r.skipped) console.warn(`${tag} ${r.skipped} new chunk(s) were skipped as duplicates.`);
+            } catch (ae) {
+                stats.failed += brandNew.length;
+                logAnkiError(`${tag} adding new chunks`, ae, { deck, chunkIds: brandNew.map(b => b.uid) });
+            }
+        }
 
-                    const oldContent = noteInfo[0].fields.Content?.value || '';
-                    const oldFull = noteInfo[0].fields.FullNote?.value || '';
+        stats.orphaned = pool.length;
+        for (const o of pool) console.warn(`${tag} Orphaned card (chunk no longer in note, NOT deleted): note ${o.noteId}, ${ankiField(o, 'ChunkID')}`);
+        console.log(`${tag} Done`, stats);
+        return stats;
+    }
 
-                    const newContentClean = newContentHtml.trim();
-                    const oldContentClean = oldContent.trim();
-                    const isContentChanged = oldContentClean !== newContentClean;
+    summarizeAnkiStats(s: AnkiUpdateStats): string {
+        if (s.notExported) return 'not exported to Anki yet (use Export first)';
+        const parts = [`${s.updated} content-updated & reset`, `${s.refreshed} headings/full-note refreshed`];
+        if (s.relinked) parts.push(`${s.relinked} renamed chunks relinked`);
+        if (s.added) parts.push(`${s.added} new added`);
+        if (s.orphaned) parts.push(`${s.orphaned} orphaned (kept)`);
+        if (s.failed) parts.push(`${s.failed} FAILED (see console)`);
+        return parts.join(', ');
+    }
 
-                    if (isContentChanged || oldFull !== fullNoteHtml) {
-                        await ankiRequest('updateNoteFields', {
-                            note: { id: foundIds[0], fields: { 
-                                Content: newContentHtml, 
-                                FullNote: fullNoteHtml,
-                                HeadingPath: localToc,
-                                ImmediateHeading: chunk.immediateHeading 
-                            } }
-                        });
-                        
-                        if (isContentChanged) {
-                            const cards = await ankiRequest('findCards', { query: `nid:${foundIds[0]}` });
-                            if (cards.length > 0) await ankiRequest('forgetCards', { cards });
-                            updatedCount++;
-                        }
-                    }
+    async updateAnkiCards(file: TFile) {
+        if (this.ankiBusy) { new Notice('Echo Recall: an Anki export/update is already running.'); return; }
+        this.ankiBusy = true;
+        const notice = new Notice('Echo Recall: Initializing Anki update...', 0);
+        const setMsg = (m: string) => { notice.noticeEl.innerText = m; };
+        console.log(`[Echo Recall] Starting update for: ${file.path}`);
+        try {
+            const stats = await this.runAnkiUpdate(file, setMsg);
+            notice.hide();
+            new Notice(`Anki Update: ${this.summarizeAnkiStats(stats)}.`, 8000);
+        } catch (e) {
+            logAnkiError('Anki update', e, { file: file.path });
+            notice.hide();
+            new Notice('Anki update failed. Check console for details.', 5000);
+        } finally {
+            this.ankiBusy = false;
+        }
+    }
+
+    async updateAllAnkiCards() {
+        if (this.ankiBusy) { new Notice('Echo Recall: an Anki export/update is already running.'); return; }
+        this.ankiBusy = true;
+        const notice = new Notice('Echo Recall: Scanning Anki for exported notes...', 0);
+        const setMsg = (m: string) => { notice.noticeEl.innerText = m; };
+        try {
+            await setupAnkiNoteType();
+            const ids: number[] = await ankiRequest('findNotes', { query: '"ChunkID:echo\\_*"' });
+            const vault = this.app.vault.getName();
+            const paths = new Set<string>();
+            for (let i = 0; i < ids.length; i += 25) {
+                const infos: AnkiNoteInfo[] = await ankiRequest('notesInfo', { notes: ids.slice(i, i + 25) });
+                for (const info of infos) {
+                    if (!info || !info.noteId) continue;
+                    const m = /vault=([^&]*)(?:&amp;|&)file=([^&"]*)/.exec(ankiField(info, 'ObsidianURI'));
+                    if (!m) continue;
+                    try { if (decodeURIComponent(m[1]) === vault) paths.add(decodeURIComponent(m[2])); } catch (de) { console.warn('[Echo Recall] Bad ObsidianURI skipped', m[0], de); }
                 }
             }
-            updateNotice.hide();
-            console.log(`[Echo Recall] Update Complete. ${updatedCount} cards updated.`);
-            new Notice(`Anki Update Complete: ${updatedCount} cards updated & reset.`);
+            const list = Array.from(paths);
+            console.log(`[Echo Recall] Update-all: ${ids.length} Anki notes across ${list.length} Obsidian files.`);
+            let ok = 0, missing = 0, failed = 0;
+            for (let i = 0; i < list.length; i++) {
+                const f = this.app.vault.getAbstractFileByPath(list[i]);
+                if (!(f instanceof TFile)) { missing++; console.warn(`[Echo Recall][Update-all] File not found in vault (renamed/deleted?): ${list[i]}`); continue; }
+                try {
+                    const st = await this.runAnkiUpdate(f, m => setMsg(`[${i + 1}/${list.length}] ${f.basename}: ${m}`));
+                    if (st.failed) failed++; else ok++;
+                } catch (fe) { failed++; logAnkiError(`Update-all file ${f.path}`, fe); }
+            }
+            notice.hide();
+            new Notice(`Anki Update-all: ${ok} notes updated, ${failed} with errors, ${missing} missing in vault.`, 8000);
         } catch (e) {
-            console.error("[Echo Recall] Anki update failed:", e);
-            if (typeof updateNotice !== 'undefined') updateNotice.hide();
-            new Notice('Anki update failed. Check console for details.', 5000);
+            logAnkiError('Anki update-all', e);
+            notice.hide();
+            new Notice('Anki update-all failed. Check console for details.', 5000);
+        } finally {
+            this.ankiBusy = false;
         }
     }
 
@@ -2013,10 +2108,16 @@ export default class EchoRecallPlugin extends Plugin {
     }
 
     async loadSettings() {
-        this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+        const saved = await this.loadData();
+        this.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
+        if (!saved || saved.studyMode === undefined) {
+            this.settings.studyMode = this.settings.heavyRecallStep3 ? 'full' : this.settings.enableHeavyRecallMode ? 'heading' : 'echo';
+        }
+        ANKI_CONNECT_PORT = this.settings.ankiConnectPort || 8765;
     }
 
     async saveSettings() {
+        ANKI_CONNECT_PORT = this.settings.ankiConnectPort || 8765;
         await this.saveData(this.settings);
     }
 
@@ -2196,6 +2297,28 @@ export default class EchoRecallPlugin extends Plugin {
         .echo-heavy-blank { padding: 30px; text-align: center; border: 2px dashed var(--background-modifier-border); border-radius: 12px; margin-top: 20px;}
         .echo-heavy-content { margin-top: 20px; text-align: left; }
 
+        .echo-mode-select { display: flex; flex-direction: column; border: 1px solid var(--background-modifier-border); border-radius: 10px; overflow: hidden; margin-bottom: 4px; }
+        .echo-mode-option, .echo-mode-suboption { display: flex; gap: 12px; align-items: flex-start; padding: 14px 16px; cursor: pointer; border-bottom: 1px solid var(--background-modifier-border); }
+        .echo-mode-select .echo-mode-option:last-child { border-bottom: none; }
+        .echo-mode-option input[type="radio"], .echo-mode-suboption input[type="checkbox"] { margin-top: 3px; cursor: pointer; }
+        .echo-mode-text { display: flex; flex-direction: column; gap: 4px; }
+        .echo-mode-title { font-weight: 600; cursor: pointer; }
+        .echo-mode-desc { font-size: 0.9em; color: var(--text-muted); }
+        .echo-mode-suboption { border: 1px solid var(--background-modifier-border); border-radius: 10px; margin: 10px 0 20px 24px; background: var(--background-secondary); }
+
+        @media (max-width: 800px) {
+            .echo-analytics-wrapper { flex-direction: column; border-right: none; }
+            .echo-heatmap-wrapper, .echo-stats-wrapper { border-right: none; border-bottom: 1px solid var(--background-modifier-border); padding-right: 0; padding-bottom: 20px; }
+        }
+
+        @media (max-width: 600px) {
+            .echo-dash-header { flex-direction: column; gap: 20px; align-items: flex-start; }
+            .echo-bottom-section { flex-direction: column; gap: 15px; }
+            .echo-bottom-directive-text { padding: 0; }
+            .echo-table-wrapper { font-size: 0.9em; }
+            .echo-markdown-content { padding: 15px; }
+        }
+
         @media (max-width: 800px) {
             .echo-analytics-wrapper { flex-direction: column; border-right: none; }
             .echo-heatmap-wrapper, .echo-stats-wrapper { border-right: none; border-bottom: 1px solid var(--background-modifier-border); padding-right: 0; padding-bottom: 20px; }
@@ -2229,238 +2352,149 @@ class EchoRecallSettingsTab extends PluginSettingTab {
     }
 
     display(): void {
-        const { containerEl } = this;
-        containerEl.empty();
-
-        containerEl.createEl('h2', { text: 'Echo Recall Settings' });
-
-        containerEl.createEl('h3', { text: 'Study Modes & Export' });
-
-        new Setting(containerEl)
-            .setName("Heavy Recall & Brainstorming Mode")
-            .setDesc("A completely different mode! Instead of fill-in-the-blanks, the whole content under headings is blanked out. Forces strong active recall. Context is preserved.")
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.enableHeavyRecallMode)
-                .onChange(async (val) => {
-                    this.plugin.settings.enableHeavyRecallMode = val;
-                    await this.plugin.saveSettings();
-                    this.display();
-                }));
-
-        if (this.plugin.settings.enableHeavyRecallMode) {
-            new Setting(containerEl)
-                .setName("Heavy Recall: Enable Step 3")
-                .setDesc("Adds a final step where the ENTIRE note is blanked out to test full structural recall.")
-                .addToggle(toggle => toggle
-                    .setValue(this.plugin.settings.heavyRecallStep3)
-                    .onChange(async (val) => {
-                        this.plugin.settings.heavyRecallStep3 = val;
-                        await this.plugin.saveSettings();
-                    }));
-        }
-
-        new Setting(containerEl)
-            .setName("Anki Export: Default Deck")
-            .setDesc("Name of the deck where notes will be exported (Requires AnkiConnect).")
-            .addText(text => text
-                .setPlaceholder("Default")
-                .setValue(this.plugin.settings.ankiDeckName)
-                .onChange(async (val) => {
-                    this.plugin.settings.ankiDeckName = val;
-                    await this.plugin.saveSettings();
-                }));
-                
-        new Setting(containerEl)
-            .setName("Anki Export: Default Tags")
-            .setDesc("Comma separated tags for the Anki cards.")
-            .addText(text => text
-                .setPlaceholder("obsidian")
-                .setValue(this.plugin.settings.ankiTags)
-                .onChange(async (val) => {
-                    this.plugin.settings.ankiTags = val;
-                    await this.plugin.saveSettings();
-                }));
-
-        containerEl.createEl('br');
-        containerEl.createEl('h3', { text: 'General Masking Settings' });
-        containerEl.createEl('p', { text: 'Configure which elements should be bypassed by the text masking engine.', cls: 'setting-item-description' });
-        containerEl.createEl('br');
-
-        new Setting(containerEl)
-            .setName("Scheduling mode")
-            .setDesc("Confidence: original fixed 1/7/14-day intervals from the confidence dropdown. "
-                + "Adaptive (SM-2): grade your recall at the end of each session and let the interval "
-                + "adapt to how well you remembered. Deadlines still shorten the wait in both modes.")
-            .addDropdown(drop => drop
-                .addOption('confidence', 'Confidence (fixed intervals)')
-                .addOption('sm2', 'Adaptive (SM-2)')
-                .setValue(this.plugin.settings.schedulingMode)
-                .onChange(async (val) => {
-                    this.plugin.settings.schedulingMode = val as 'confidence' | 'sm2';
-                    await this.plugin.saveSettings();
-                    this.display(); 
-                }));
-
-        if (this.plugin.settings.schedulingMode === 'sm2') {
-            new Setting(containerEl)
-                .setName("Simplify SM-2 grades")
-                .setDesc("Show only 'Good' (Pass) and 'Again' (Fail) buttons to decrease micro-decisions during study.")
-                .addToggle(toggle => toggle
-                    .setValue(this.plugin.settings.sm2SimplifyGrades)
-                    .onChange(async (val) => {
-                        this.plugin.settings.sm2SimplifyGrades = val;
-                        await this.plugin.saveSettings();
-                    }));
-        }
-
-        new Setting(containerEl)
-            .setName("Cueing mode")
-            .setDesc("How masked words appear. Blank: full underscores (original). First letter: keep "
-                + "the first letter as a hint (w____). Graduated: show the first letter on the lighter "
-                + "masking step, then withdraw it to full blanks on the heavy step.")
-            .addDropdown(drop => drop
-                .addOption('blank', 'Blank (____)')
-                .addOption('first-letter', 'First letter (w___)')
-                .addOption('graduated', 'Graduated (withdraw the cue)')
-                .setValue(this.plugin.settings.cueMode)
-                .onChange(async (val) => {
-                    this.plugin.settings.cueMode = val as 'blank' | 'first-letter' | 'graduated';
-                    await this.plugin.saveSettings();
-                }));
-
-        new Setting(containerEl)
-            .setName("Enable typed recall")
-            .setDesc("Adds a '⌨ Type' button in a session to type the passage from memory and score it "
-                + "against the note (word-level accuracy).")
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.enableTypedRecall)
-                .onChange(async (val) => {
-                    this.plugin.settings.enableTypedRecall = val;
-                    await this.plugin.saveSettings();
-                }));
-
-        new Setting(containerEl)
-            .setName("Enable [▶ echo] Button")
-            .setDesc("Show the echo button in the top right header of your notes.")
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.enableEchoButton)
-                .onChange(async (val) => {
-                    this.plugin.settings.enableEchoButton = val;
-                    await this.plugin.saveSettings();
-                    this.plugin.injectHeaderButtons();
-                }));
-
-        new Setting(containerEl)
-            .setName("Chunking")
-            .setDesc("Break a long note into pieces. Paragraph: standard block split. Hierarchical: context-aware block split safely on headings. Sentence: split on periods. Off: whole note.")
-            .addDropdown(drop => drop
-                .addOption('off', 'Off (whole note)')
-                .addOption('hierarchical', 'Hierarchical (Context-aware)')
-                .addOption('paragraph', 'Paragraph by paragraph')
-                .addOption('sentence', 'By sentence')
-                .setValue(this.plugin.settings.chunkMode)
-                .onChange(async (val) => {
-                    this.plugin.settings.chunkMode = val as 'off' | 'hierarchical' | 'paragraph' | 'sentence';
-                    await this.plugin.saveSettings();
-                }));
-
-        new Setting(containerEl)
-            .setName("Interleave due notes")
-            .setDesc("When starting your due notes, mix them across their echo tags so consecutive "
-                + "notes cover different topics (interleaving improves retention over blocked practice).")
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.interleaveDueQueue)
-                .onChange(async (val) => {
-                    this.plugin.settings.interleaveDueQueue = val;
-                    await this.plugin.saveSettings();
-                }));
-
-        new Setting(containerEl)
-            .setName("Enable Quick-Look and Cheating Mode")
-            .setDesc("Allows clicking on a blank to reveal the word (turns red to indicate a cheat)")
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.enableQuickLook)
-                .onChange(async (val) => {
-                    this.plugin.settings.enableQuickLook = val;
-                    await this.plugin.saveSettings();
-                }));
-
-        new Setting(containerEl)
-            .setName("Don't revise callouts")
-            .setDesc("Skips all text located inside Obsidian callouts")
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.skipCallouts)
-                .onChange(async (val) => {
-                    this.plugin.settings.skipCallouts = val;
-                    await this.plugin.saveSettings();
-                }));
-
-        new Setting(containerEl)
-            .setName("Don't revise checkboxes")
-            .setDesc("Skips all text inside task/checkbox lines")
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.skipCheckboxes)
-                .onChange(async (val) => {
-                    this.plugin.settings.skipCheckboxes = val;
-                    await this.plugin.saveSettings();
-                }));
-
-        new Setting(containerEl)
-            .setName("Don't revise quotes")
-            .setDesc("Skips standard blockquotes")
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.skipQuotes)
-                .onChange(async (val) => {
-                    this.plugin.settings.skipQuotes = val;
-                    await this.plugin.saveSettings();
-                }));
-
-        new Setting(containerEl)
-            .setName("Exclude internal links")
-            .setDesc("Prevents masking text inside [[wikilinks]]")
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.excludeInternalLinks)
-                .onChange(async (val) => {
-                    this.plugin.settings.excludeInternalLinks = val;
-                    await this.plugin.saveSettings();
-                }));
-
-        new Setting(containerEl)
-            .setName("Exclude external links")
-            .setDesc("Prevents masking text inside [links](urls)")
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.excludeExternalLinks)
-                .onChange(async (val) => {
-                    this.plugin.settings.excludeExternalLinks = val;
-                    await this.plugin.saveSettings();
-                }));
-
-        new Setting(containerEl)
-            .setName("Exclude Attachments and embeds")
-            .setDesc("Prevents masking embedded files ![[]]")
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.excludeEmbeds)
-                .onChange(async (val) => {
-                    this.plugin.settings.excludeEmbeds = val;
-                    await this.plugin.saveSettings();
-                }));
-
-        new Setting(containerEl)
-            .setName("Don't revise custom regex")
-            .setDesc("Provide a custom regex string to bypass masking (e.g., \\^\\d+ to skip footnotes)")
-            .addText(text => text
-                .setPlaceholder("Enter regex...")
-                .setValue(this.plugin.settings.customRegex)
-                .onChange(async (val) => {
-                    this.plugin.settings.customRegex = val;
-                    await this.plugin.saveSettings();
-                }));
-
-        const footer = containerEl.createDiv('echo-settings-footer');
-        footer.innerHTML = `
-            <a href="https://github.com/sajee05/echo-recall" target="_blank">open source</a>, 
-            feel free to star the <a href="https://github.com/sajee05/echo-recall" target="_blank">repo</a> | 
-            brewed by <a href="https://www.youtube.com/@sxjeel" target="_blank">sxjeel</a> ☕
-        `;
+      const { containerEl } = this;
+      containerEl.empty();
+      containerEl.createEl("h2", { text: "Echo Recall Settings" });
+      containerEl.createEl("h3", { text: "Recall Mode" });
+      containerEl.createEl("p", { text: "Choose how content is hidden during recall.", cls: "setting-item-description" });
+      const modeWrap = containerEl.createDiv("echo-mode-select");
+      const modeOptions = [
+        { id: "heading", title: "Heading Recall", desc: "Recall entire sections from their headings.", best: "Concepts, ideas, theories, summaries and explanations." },
+        { id: "echo", title: "Fill in the Blank", desc: "Recall hidden words and phrases in the text.", best: "Poetry, speeches, quotations, definitions and exact wording." }
+      ];
+      let fullNoteRow: HTMLElement | null = null;
+      const refreshFullNoteVisibility = () => {
+        if (fullNoteRow) fullNoteRow.style.display = this.plugin.settings.studyMode === "heading" ? "flex" : "none";
+      };
+      modeOptions.forEach((opt) => {
+        const row = modeWrap.createDiv("echo-mode-option");
+        const radio = row.createEl("input", { type: "radio", attr: { name: "echo-study-mode", id: `echo-mode-${opt.id}` } });
+        radio.checked = this.plugin.settings.studyMode === opt.id;
+        const textWrap = row.createDiv("echo-mode-text");
+        const label = textWrap.createEl("label", { text: opt.title, attr: { for: `echo-mode-${opt.id}` } });
+        label.addClass("echo-mode-title");
+        textWrap.createDiv({ text: opt.desc, cls: "echo-mode-desc" });
+        const bestLine = textWrap.createDiv({ cls: "echo-mode-desc" });
+        bestLine.createEl("strong", { text: "Best for: " });
+        bestLine.appendText(opt.best);
+        const selectMode = async () => {
+          this.plugin.settings.studyMode = opt.id;
+          this.plugin.settings.enableHeavyRecallMode = opt.id === "heading";
+          if (opt.id !== "heading") this.plugin.settings.heavyRecallStep3 = false;
+          await this.plugin.saveSettings();
+          modeWrap.querySelectorAll('input[type="radio"]').forEach((rr) => {
+          const r = rr as HTMLInputElement;
+            r.checked = r.id === `echo-mode-${opt.id}`;
+          });
+          refreshFullNoteVisibility();
+        };
+        radio.onchange = selectMode;
+        row.onclick = (e) => {
+          if (e.target !== radio) selectMode();
+        };
+      });
+      const fnRow = containerEl.createDiv("echo-mode-suboption");
+      fullNoteRow = fnRow;
+      const fullCheckbox = fnRow.createEl("input", { type: "checkbox", attr: { id: "echo-full-note-check" } });
+      fullCheckbox.checked = this.plugin.settings.heavyRecallStep3;
+      fullCheckbox.onchange = async () => {
+        this.plugin.settings.heavyRecallStep3 = fullCheckbox.checked;
+        await this.plugin.saveSettings();
+      };
+      const fullLabel = fnRow.createDiv("echo-mode-text");
+      fullLabel.createEl("label", { text: "Also test the full note at the end", attr: { for: "echo-full-note-check" }, cls: "echo-mode-title" });
+      fullLabel.createDiv({ text: "After finishing every heading, add one last round where the ENTIRE note is hidden at once — the hardest possible test.", cls: "echo-mode-desc" });
+      refreshFullNoteVisibility();
+      containerEl.createEl("br");
+      containerEl.createEl("h3", { text: "Anki Export" });
+      const ankiInfo = containerEl.createEl("p", { cls: "setting-item-description" });
+      ankiInfo.innerHTML = `Exporting to Anki requires the free <a href="https://ankiweb.net/shared/info/2055492159" target="_blank">AnkiConnect</a> add-on installed in Anki, and Anki must be <strong>open</strong> while you export or update. Install it from Anki: Tools → Add-ons → Get Add-ons… → code <strong>2055492159</strong> → restart Anki.`;
+      new Setting(containerEl).setName("AnkiConnect port").setDesc("The port AnkiConnect listens on. Leave as 8765 unless you changed it in AnkiConnect's own config (Anki → Add-ons → AnkiConnect → Config).").addText((text) => text.setPlaceholder("8765").setValue(String(this.plugin.settings.ankiConnectPort)).onChange(async (val) => {
+        const port = parseInt(val, 10);
+        this.plugin.settings.ankiConnectPort = isNaN(port) ? 8765 : port;
+        await this.plugin.saveSettings();
+      }));
+      new Setting(containerEl).setName("Deck name").setDesc("Which Anki deck exported notes go into. Created automatically if it doesn't exist.").addText((text) => text.setPlaceholder("Default").setValue(this.plugin.settings.ankiDeckName).onChange(async (val) => {
+        this.plugin.settings.ankiDeckName = val;
+        await this.plugin.saveSettings();
+      }));
+      new Setting(containerEl).setName("Tags").setDesc("Comma-separated tags added to every exported Anki card.").addText((text) => text.setPlaceholder("obsidian").setValue(this.plugin.settings.ankiTags).onChange(async (val) => {
+        this.plugin.settings.ankiTags = val;
+        await this.plugin.saveSettings();
+      }));
+      containerEl.createEl("br");
+      containerEl.createEl("h3", { text: "General Masking Settings" });
+      containerEl.createEl("p", { text: "Configure which elements should be bypassed by the text masking engine.", cls: "setting-item-description" });
+      containerEl.createEl("br");
+      new Setting(containerEl).setName("Scheduling mode").setDesc("Confidence: original fixed 1/7/14-day intervals from the confidence dropdown. Adaptive (SM-2): grade your recall at the end of each session and let the interval adapt to how well you remembered. Deadlines still shorten the wait in both modes.").addDropdown((drop) => drop.addOption("confidence", "Confidence (fixed intervals)").addOption("sm2", "Adaptive (SM-2)").setValue(this.plugin.settings.schedulingMode).onChange(async (val) => {
+        this.plugin.settings.schedulingMode = val;
+        await this.plugin.saveSettings();
+        this.display();
+      }));
+      if (this.plugin.settings.schedulingMode === "sm2") {
+        new Setting(containerEl).setName("Simplify SM-2 grades").setDesc("Show only 'Good' (Pass) and 'Again' (Fail) buttons to decrease micro-decisions during study.").addToggle((toggle) => toggle.setValue(this.plugin.settings.sm2SimplifyGrades).onChange(async (val) => {
+          this.plugin.settings.sm2SimplifyGrades = val;
+          await this.plugin.saveSettings();
+        }));
+      }
+      new Setting(containerEl).setName("Cueing mode").setDesc("How masked words appear. Blank: full underscores (original). First letter: keep the first letter as a hint (w____). Graduated: show the first letter on the lighter masking step, then withdraw it to full blanks on the heavy step.").addDropdown((drop) => drop.addOption("blank", "Blank (____)").addOption("first-letter", "First letter (w___)").addOption("graduated", "Graduated (withdraw the cue)").setValue(this.plugin.settings.cueMode).onChange(async (val) => {
+        this.plugin.settings.cueMode = val;
+        await this.plugin.saveSettings();
+      }));
+      new Setting(containerEl).setName("Enable typed recall").setDesc("Adds a '\u2328 Type' button in a session to type the passage from memory and score it against the note (word-level accuracy).").addToggle((toggle) => toggle.setValue(this.plugin.settings.enableTypedRecall).onChange(async (val) => {
+        this.plugin.settings.enableTypedRecall = val;
+        await this.plugin.saveSettings();
+      }));
+      new Setting(containerEl).setName("Enable [\u25B6 echo] Button").setDesc("Show the echo button in the top right header of your notes.").addToggle((toggle) => toggle.setValue(this.plugin.settings.enableEchoButton).onChange(async (val) => {
+        this.plugin.settings.enableEchoButton = val;
+        await this.plugin.saveSettings();
+        this.plugin.injectHeaderButtons();
+      }));
+      new Setting(containerEl).setName("Chunking").setDesc("Break a long note into pieces. Paragraph: standard block split. Hierarchical: context-aware block split safely on headings. Sentence: split on periods. Off: whole note.").addDropdown((drop) => drop.addOption("off", "Off (whole note)").addOption("hierarchical", "Hierarchical (Context-aware)").addOption("paragraph", "Paragraph by paragraph").addOption("sentence", "By sentence").setValue(this.plugin.settings.chunkMode).onChange(async (val) => {
+        this.plugin.settings.chunkMode = val;
+        await this.plugin.saveSettings();
+      }));
+      new Setting(containerEl).setName("Interleave due notes").setDesc("When starting your due notes, mix them across their echo tags so consecutive notes cover different topics (interleaving improves retention over blocked practice).").addToggle((toggle) => toggle.setValue(this.plugin.settings.interleaveDueQueue).onChange(async (val) => {
+        this.plugin.settings.interleaveDueQueue = val;
+        await this.plugin.saveSettings();
+      }));
+      new Setting(containerEl).setName("Click-to-reveal blanks").setDesc("Lets you click any blanked word to reveal it mid-session (shown in red so you know you peeked).").addToggle((toggle) => toggle.setValue(this.plugin.settings.enableQuickLook).onChange(async (val) => {
+        this.plugin.settings.enableQuickLook = val;
+        await this.plugin.saveSettings();
+      }));
+      new Setting(containerEl).setName("Don't revise callouts").setDesc("Skips all text located inside Obsidian callouts").addToggle((toggle) => toggle.setValue(this.plugin.settings.skipCallouts).onChange(async (val) => {
+        this.plugin.settings.skipCallouts = val;
+        await this.plugin.saveSettings();
+      }));
+      new Setting(containerEl).setName("Don't revise checkboxes").setDesc("Skips all text inside task/checkbox lines").addToggle((toggle) => toggle.setValue(this.plugin.settings.skipCheckboxes).onChange(async (val) => {
+        this.plugin.settings.skipCheckboxes = val;
+        await this.plugin.saveSettings();
+      }));
+      new Setting(containerEl).setName("Don't revise quotes").setDesc("Skips standard blockquotes").addToggle((toggle) => toggle.setValue(this.plugin.settings.skipQuotes).onChange(async (val) => {
+        this.plugin.settings.skipQuotes = val;
+        await this.plugin.saveSettings();
+      }));
+      new Setting(containerEl).setName("Exclude internal links").setDesc("Prevents masking text inside [[wikilinks]]").addToggle((toggle) => toggle.setValue(this.plugin.settings.excludeInternalLinks).onChange(async (val) => {
+        this.plugin.settings.excludeInternalLinks = val;
+        await this.plugin.saveSettings();
+      }));
+      new Setting(containerEl).setName("Exclude external links").setDesc("Prevents masking text inside [links](urls)").addToggle((toggle) => toggle.setValue(this.plugin.settings.excludeExternalLinks).onChange(async (val) => {
+        this.plugin.settings.excludeExternalLinks = val;
+        await this.plugin.saveSettings();
+      }));
+      new Setting(containerEl).setName("Exclude Attachments and embeds").setDesc("Prevents masking embedded files ![[]]").addToggle((toggle) => toggle.setValue(this.plugin.settings.excludeEmbeds).onChange(async (val) => {
+        this.plugin.settings.excludeEmbeds = val;
+        await this.plugin.saveSettings();
+      }));
+      new Setting(containerEl).setName("Don't revise custom regex").setDesc("Provide a custom regex string to bypass masking (e.g., \\^\\d+ to skip footnotes)").addText((text) => text.setPlaceholder("Enter regex...").setValue(this.plugin.settings.customRegex).onChange(async (val) => {
+        this.plugin.settings.customRegex = val;
+        await this.plugin.saveSettings();
+      }));
+      const footer = containerEl.createDiv("echo-settings-footer");
+      footer.innerHTML = `
+              <a href="https://github.com/sajee05/echo-recall" target="_blank">open source</a>, 
+              feel free to star the <a href="https://github.com/sajee05/echo-recall" target="_blank">repo</a> | 
+              brewed by <a href="https://www.youtube.com/@sxjeel" target="_blank">sxjeel</a> \u2615
+          `;
     }
 }

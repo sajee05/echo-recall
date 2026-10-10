@@ -1,11 +1,12 @@
 {
   "id": "echo-recall",
   "name": "Echo Recall",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "minAppVersion": "1.1.0",
-  "description": "Memorize and Revise your notes actively with spaced repetition and retrospective deadlines. Now Featuring Anki Export with Differential Sync and Chunking.",
+  "description": "Active-recall revision with spaced repetition, deadlines, and chunked Anki export with differential sync.",
   "author": "sxjeel",
-  "isDesktopOnly": false,
+  "authorUrl": "https://github.com/sajee05",
+  "isDesktopOnly": false
   "keywords": [
     "spaced repetition",
     "active recall",
@@ -16,5 +17,4 @@
     "sync",
     "export",
     "chunking"
-  ]
 }

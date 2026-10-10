@@ -14,8 +14,10 @@
   "interleaveDueQueue": true,
   "sm2SimplifyGrades": true,
   "enableEchoButton": true,
+  "studyMode": "heading",
   "enableHeavyRecallMode": true,
   "heavyRecallStep3": false,
   "ankiDeckName": "**Obsidian-Notes",
-  "ankiTags": "obsidian"
+  "ankiTags": "obsidian",
+  "ankiConnectPort": 8765
 }

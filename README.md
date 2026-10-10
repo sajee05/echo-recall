@@ -17,192 +17,128 @@
 ![Release](https://img.shields.io/badge/Release-v1.2.0-success.svg?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)
 
-Echo Recall is a lightweight but powerful revision engine for Obsidian. It turns your long study notes into a dynamic memory game. You never have to export your data again.
+Echo Recall turns your own notes into an active-recall study tool. It turns your long study notes into a dynamic memory game. You read your real note, parts of it get hidden, and you try to remember them before revealing.
 
 ---
 
-## 1. Core Philosophy & Problem Statement
+## 1. What problem does this solve?
 
-**The Problem:** Flashcard apps like Anki are great for tiny facts. But they are terrible for long notes. Breaking a big paragraph into tiny cards ruins the flow. You lose the context of your notes. Also, exporting text often breaks tables and links.
-
-**The Solution:** Echo Recall fixes this problem. It brings the testing environment directly to your notes. Just open a note and click "**[▶ echo]**" in the top right. Follow the instructions on the screen. That's it! You have reviewed your note.
-
-For scheduling, this plugin uses spaced repetition. It also uses a "retrospective revision" schedule based on your deadlines. This idea was [conceptualized by Ali Abdaal](https://aliabdaal.com/retrospective-revision-timetable/).
+Flashcard apps (like Anki) chop your notes into tiny, out-of-context cards. You lose the "big picture." Echo Recall keeps your note whole and just hides pieces of it, step by step, so you're always recalling things *in context*.
 
 ---
 
-## 2. New Updates (experimental)
+## 2. Recall Modes
 
-We have massively expanded what Echo Recall can do. You can configure these in the settings.
+Go to **Settings → Echo Recall → Recall Mode** and pick ONE. Only one mode runs at a time.
 
-### A. Anki Export & Differential Sync
-Do you love Obsidian for notes but prefer Anki for scheduling? Echo Recall now acts as a bridge. Obsidian remains your source of truth, and Anki becomes your revision app. *(Requires the AnkiConnect add-on).*
-
-* **Context-Aware Cards:** Click the **Export to Anki** ribbon icon. It slices your note by headings. Each Anki card displays a full left-sidebar Table of Contents, highlighting exactly where you are in the note.
-* **Rich UI & Full Note View:** The Anki cards use a custom CSS theme that mimics Obsidian. Forgot the context? Click the "👁 View Full Note" button inside Anki to instantly see your entire Obsidian note as an overlay.
-* **Media Support:** Images (`![[]]`) and GIFs are converted to Base64 and injected directly into Anki's media database. No broken links.
-* **Differential Update Engine:** If you edit a paragraph in Obsidian, click the **Update Anki** ribbon icon. The plugin uses string-hashing to push the text updates to Anki, but it will **ONLY** mark the specific changed card as 'Again' (resetting its progress). The rest of your deck's scheduling remains untouched.
-
-### B. Heavy Recall & Brainstorming Mode
-If progressive fill-in-the-blanks is too easy, switch to Heavy Mode. It completely hides the content under your headings to force hardcore brainstorming.
-* **Step 1 (Skim):** View the entire note to prime your memory.
-* **Step 2 (Recall):** Go chunk-by-chunk. You only see the heading. Recall everything under it, then click to reveal.
-* **Step 3 (Final Test):** The entire note is blanked out. Reconstruct the whole document's structure in your head.
-
-### C. Context-Aware Hierarchical Chunking
-Instead of splitting blindly by paragraphs, the new `Hierarchical` chunking setting reads your Markdown headers (`# H1`, `## H2`). When reviewing a small `H3` section, it keeps the `H1` and `H2` parents visible so you never lose the big picture.
-
-**Additional miscellaneous updates are detailed in the release notes.**
+| Mode | What gets hidden | Best for |
+|---|---|---|
+| **Heading Recall** (default) | The entire content under one heading at a time | Concepts, ideas, theories, summaries and explanations |
+| **Fill in the Blank** | Individual words and phrases, turned into blanks (`____`) | Poetry, speeches, quotations, definitions, and anything you must get word-for-word |
 
 ---
 
-## 3. Review Workflow 
+## 3. Workflow (3 steps)
 
-### A. The 3-Step Revision and Review
+1. Open any note you want to revise.
+2. Click the **[▶ echo]** button at the top-right of the note (or run the command **"Revise active note"**).
+3. Follow the on-screen steps: read, recall, reveal, repeat.
 
-![Review UI](https://github.com/sajee05/echo-recall/blob/main/review.png)
-
-When you start a session, Echo Recall opens a clean UI in a new tab. This uses a **Progressive Masking System**. 
-
-Progressive = Masking gets harder based on your confidence level. If a note is **Hard**, it uses normal masking. If **Moderate**, it hides 10% more words. If **Easy**, it hides 20% more words. This forces you to remember more with fewer clues.
-
-#### Smarter Review Tools (New in v1.2.0)
-* **Context Chunking:** Break long notes into smaller chunks (paragraphs/sentences). The engine safely remembers your `## Headings` so you never lose context!
-* **The Peek Button (👁️):** Forget what the chunk is about? Click the Eye icon to quickly peek at the full, unhidden note.
-* **Graduated Cueing:** Turn full blanks into first-letter hints (like `w____`) to help nudge your memory.
-* **Typed Recall:** Open a text box, type what you remember, and get an exact accuracy percentage.
-
-#### Step 1: Read-Through View
-This step helps your brain remember the note's flow.
-* **Functionality:** It shows your full markdown text clearly. Nothing is hidden yet. 
-
-#### Step 2: Progressively Masked View
-This is your first active recall challenge.
-* **Functionality:** Some words are replaced by blanks (`____`). The blanks match the exact length of the hidden words. It protects your formatting like bold text, tables, highlights, lists, etc.
-
-#### Step 3: Heavily Masked View
-This is the final test for true memory retention.
-* **Functionality:** Most of the text is hidden. Only a few anchor words remain to guide your memory.
-
-#### UI Controls & Interactivity
-* **[Back] Button:** Go back one step. Use this if you forget something and need a quick hint.
-* **[Next] Button:** Move forward to the next step.
-* **[Finish & Log] Button:** This ends the session. It saves today's date in your history. Then, it safely returns you to the dashboard.
+That's it. 
 
 ---
 
-### B. Dashboard 
+## 4. How a Fill in the Blank session works
 
-![Dashboard](https://github.com/sajee05/echo-recall/blob/main/schedule-r.png)
+1. **Step 1 — Read it.** Full text shown, no blanks. Just read it a couple of times.
+2. **Step 2 — Light blanks.** Some words are hidden. Try to say the missing words out loud.
+3. **Step 3 — Heavy blanks.** More words hidden. If you get stuck, go back a step and re-read.
 
-Click the brain icon in the ribbon to open the Dashboard. This is your main control center. Here, you can view, manage, and start your daily reviews.
-
-#### 1. "Due Today" 
-This shows a big number of notes you need to review today. It has a **[▶ Start Due Notes]** button. Click it to instantly start reviewing all your due notes in order.
-
-#### 2. Advanced Analytics Panel
-* **Stats Board:** Track your Current Streak (🔥), total revisions, and average daily reviews.
-* **Revision Heatmap & Future Echoes:** Beautiful charts showing your past consistency and exactly how many notes are due over the next 7 days.
-
-#### 3. Data Navigation Tabs
-* **"View All":** A clean list of all tracked notes in your vault. You can sort them by date.
-* **"Tag-wise View":** This groups your notes by custom "Echo tags". It shows stats for each tag, like total reviews and confidence levels.
-	* *New:* You can now bulk-apply a deadline to a tag, bulk-archive a tag, or click `[▶ echo all]` to instantly review all notes in that tag!
-	* *Note:* These are different from standard Obsidian tags. Echo tags help you organize notes for a specific exam. 
-* **"Archives":** This shows archived notes. They are completely hidden from your review schedule.
-	* Think of this like "suspending" cards in Anki. 
-	* When an exam is over, just archive those notes! You can unarchive them later. Archived notes ignore spaced repetition.
-
-#### 4. Dashboard Data Table Columns
-
-| Column Name      | Functionality & Interaction                                                                                               |
-| :--------------- | :------------------------------------------------------------------------------------------------------------------------ |
-| **Date Added**   | Shows when the note was first added to Echo Recall.                                                                       |
-| **Note Title**   | Click this to instantly open the markdown file. Notes failing 8+ times get a 🩸 Leech warning.                            |
-| **Tags**         | Click `+ tag` to add and remove Echo tags easily.                                                                         |
-| **Revs**         | Shows the total number of times you finished a 3-step review.                                                             |
-| **Last Revised** | Shows the exact date you last reviewed this note.                                                                         |
-| **Confidence**   | A dropdown with 🔴 Hard, 🟡 Moderate, or 🟢 Easy. Changing this updates your next review date.                            |
-| **Action**       | **[▶ echo]**: Starts a quick review for just this note.<br>**[🎓/🔄]**: Archives or unarchives the note safely.           |
-| **Deadline**     | Set a target exam date. The plugin will prioritize notes with closer deadlines. You can set this for a whole tag at once! |
+At the end, you grade how well you remembered it (Hard / Moderate / Easy), and the app decides when to show you this note again.
 
 ---
 
-### C. Plugin System Settings Panel
+## 5. Scheduling — when will I see this note again?
 
-Echo Recall safely reads your markdown text. But you can choose what it ignores during reviews. There are 4 toggles:
+Two modes, pick one in Settings:
 
-1. **Don't revise callouts** *(Default: On)*: Ignores text inside Obsidian callouts (`> [!`).
-2. **Don't revise checkboxes** *(Default: On)*: Ignores checklist items (`- [ ]`).
-3. **Don't revise quotes** *(Default: Off)*: Ignores standard markdown quotes (`>`).
-4. **Don't revise custom regex** *(Optional)*: Advanced users can type custom rules here. This hides things like code snippets or footnotes.
+- **Confidence mode (simple, default):**
+  - Hard → see it again tomorrow
+  - Moderate → see it again in 7 days
+  - Easy → see it again in 14 days
+- **Adaptive (SM-2) mode:** A smarter algorithm (same one Anki uses) that adjusts the gap based on how well you actually remembered it, every time.
 
----
-
-## 4. Metadata Spec (YAML Schema)
-
-Echo Recall saves all data in your note's YAML properties. This means you own your data forever. It will never break your vault.
-
-When you study a note, the plugin adds these properties:
-
-```yaml
----
-echo_date_added: 2024-01-01      # YYYY-MM-DD: Creation date
-echo_last_revised: 2024-01-15    # YYYY-MM-DD: Last completed session
-echo_revision_count: 4           # Integer: Total completed loops
-echo_confidence: Moderate        # String: 'Hard', 'Moderate', or 'Easy'
-echo_next_due: 2024-01-22        # YYYY-MM-DD: Scheduled due date
-echo_tags:                       # Array: Independent dashboard tags
-  - Law
-  - Chapter_1
-echo_deadline: 2024-02-01        # YYYY-MM-DD: Target exam/deadline date
-echo_archived: false             # Boolean: Suspension state
-echo_history:                    # Array: Appended timestamps for Heatmap
-  - 2024-01-01
-echo_ease: 2.5                   # (SM-2) Ease multiplier
-echo_interval: 6                 # (SM-2) Uncapped interval
-echo_reps: 2                     # (SM-2) Consecutive passes
-echo_past_grades:                # (SM-2) Last grades history
-  - Good
----
-```
+**Exam deadline:** You can set a deadline date on any note. If the deadline is close, Echo Recall automatically shortens the gap so you don't fall behind before your exam.
 
 ---
 
-## 5. Scheduling Algorithm
+## 6. The Dashboard
 
-> [!info] philosophy
-> It's NOT necessary to revise ALL your daily due cards. It is completely up to you! My personal goal is to hit "EASY" on all notes before my exam arrives. My exam is months away, so spaced repetition keeps me from forgetting. You can use spaced repetition alone, use it with deadlines, or just use deadlines. Feel free to ignore this and study your own way!
+Click the brain icon in the left sidebar to open it. It shows:
 
-**Engine A: Standard Confidence (Fixed Multipliers)**
-Standard spaced repetition uses fixed days. Echo Recall sets intervals based on your choice:
-* **Hard:** 1 Day
-* **Moderate:** 7 Days
-* **Easy:** 14 Days
-
-**Engine B: Adaptive SM-2 (Opt-in via Settings)**
-If you enable SM-2 scheduling, your intervals adapt based on a post-session grade (Again, Hard, Good, Easy) using industry-standard SM-2 math. *Pro-tip: Enable "Simplify SM-2 grades" in settings to only show Pass/Fail buttons and prevent decision fatigue.*
-
-**Deadline Prioritization (The Override)**
-Studying for exams also requires deadlines. If you add an `echo_deadline`, the plugin counts the days left until your exam. 
-
-**The Override Logic:**
-Is your confidence marked "Hard" or "Moderate"? Are you running out of time before the deadline? If so, the plugin safely shortens your wait time. It ensures you review the note again before test day.
-
-**The Math:**
-```javascript
-Days = Math.max(1, Math.floor(DaysRemaining * 0.5))
-```
-<<<<<<< HEAD
-*Example:* A "Moderate" note usually waits 7 days. But what if your exam is in 4 days? The plugin cuts the wait to 2 days (`4 * 0.5`). You will safely review it before the test.
-=======
-*Example:* A "Moderate" note usually waits 7 days. But what if your exam is in 4 days? The plugin cuts the wait to 2 days (`4 * 0.5`). You will safely review it before the test.
+- How many notes are **due today**, with a "Start Due Notes" button to revise them all in one go
+- A **heatmap** of your past revision activity (like GitHub's contribution graph)
+- Your current **streak**, total revisions, and a breakdown by confidence level
+- A table of every note you're tracking — tags, last revised date, confidence, deadline — all editable right there
+- **Tag-wise view** — group notes by tag and revise a whole tag at once
+- **Archive** — notes you're done with, so they stop showing up as "due"
 
 ---
 
-## Credits & Contributors
+## 7. Exporting to Anki (optional)
+
+If you'd rather revise on your phone using Anki, you can export your notes as Anki flashcards.
+
+### 7.1 One-time setup (do this first!)
+1. Open **Anki** (the desktop app) and keep it running.
+2. In Anki: **Tools → Add-ons → Get Add-ons…**
+3. Paste this code: `2055492159` and click OK. This installs **AnkiConnect** <= Echo Recall talks to Anki through it.
+4. Restart Anki.
+5. (Optional) In Obsidian Settings → Echo Recall, check the **AnkiConnect port** — it should say `8765`. Only change this if you edited AnkiConnect's own config to use a different port.
+
+> ⚠️ Anki must be **open in the background** every time you export or update — Echo Recall sends your notes to it live over that port.
+
+### 7.2 Exporting
+- Click the "cards/layers icon" in the sidebar (or run **"Export active note to Anki"**) while viewing a note.
+- Your note is split the same way it's chunked for revision (in heading recall mode), and each piece becomes one Anki card with a "View Full Note" button so you never lose context.
+- Images and linked notes are carried over automatically.
+
+### 7.3 Updating after you edit a note
+- Instead of re-exporting (which can create duplicates), run **"Differential update Anki cards"**. It only pushes what actually changed, and resets the card's Anki schedule for anything that changed.
+
+---
+
+## 8. Where is my data stored?
+
+Nowhere external. Everything: confidence, next revision date, deadline, tags, history = is saved as plain YAML **properties at the top of the note itself**. Your data lives in your vault, in your notes, no cloud.
+
+---
+
+## 9. All Settings simplified: 
+
+| Setting | What it does |
+|---|---|
+| **Recall Mode** | Pick Heading Recall (default) or Fill in the Blank, plus the optional "full note" checkbox — see section 3 |
+| **AnkiConnect port** | The port number Anki listens on for exports. Default `8765` — don't touch unless you know you changed it |
+| **Deck name** | Which Anki deck your exported cards land in |
+| **Tags** | Tags added to every exported Anki card |
+| **Scheduling mode** | Confidence (fixed days) or Adaptive SM-2 (smart) — see section 5 |
+| **Simplify SM-2 grades** | Shows only "Good"/"Again" instead of 4 grade buttons, if SM-2 is on |
+| **Cueing mode** | How a hidden word looks: fully blank, first-letter shown, or "graduated" (starts with a hint, removes it later) |
+| **Enable typed recall** | Adds a box to type out the passage from memory and get a % score |
+| **Enable [▶ echo] button** | Shows/hides the quick-start button at the top of your notes |
+| **Chunking** | How a long note is split into revision pieces: by heading (recommended), by paragraph, by sentence, or not at all |
+| **Interleave due notes** | Mixes topics together when revising several due notes, instead of doing them one tag at a time (proven to help memory) |
+| **Click-to-reveal blanks** | Lets you click a blank to peek at the answer (shown in red, so you know you cheated) |
+| **Don't revise callouts / checkboxes / quotes** | Skip masking text inside these block types |
+| **Exclude internal/external links, embeds** | Skip masking text inside `[[links]]`, `[links](url)`, or `![[embeds]]` |
+| **Custom regex** | Advanced: skip masking anything matching your own pattern |
+
+---
+
+## 10. Credits
+
+Open source - contributions welcome. ⭐ 
+
 * **[sxjeel](https://github.com/sajee05):** Creator and maintainer, Ideation, UI/UX, Dashboard, analytics, Context-aware chunking, etc. ☕
 * **[@DocGRD](https://github.com/DocGRD):** Core contributor of the Adaptive SM-2 logic, base Chunking engine, Graduated cueing, and Typed-recall scoring. 🧩
-
-A massive thank you to the open-source community for helping improve Echo Recall!
->>>>>>> 44784f2231a4f3761c1314dad1c74b7affb69280

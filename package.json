@@ -1,15 +1,15 @@
 {
   "name": "echo-recall",
-  "version": "1.1.0",
-  "description": "",
-  "main": "index.js",
+  "version": "3.0.0",
+  "description": "Active-recall revision with spaced repetition and Anki export for Obsidian.",
+  "main": "main.js",
   "scripts": {
-  "build": "npx esbuild main.ts --bundle --external:obsidian --outfile=main.js --format=cjs",
-  "dev": "npx esbuild main.ts --bundle --external:obsidian --outfile=main.js --format=cjs --watch"
+    "build": "esbuild main.ts --bundle --external:obsidian --outfile=main.js --format=cjs --target=es2018",
+    "dev": "esbuild main.ts --bundle --external:obsidian --outfile=main.js --format=cjs --target=es2018 --watch"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": ["spaced repetition", "active recall", "anki"],
+  "author": "sxjeel",
+  "license": "MIT",
   "type": "commonjs",
   "devDependencies": {
     "esbuild": "^0.28.1",
