@@ -1,0 +1,21 @@
+   name: Attest release assets
+   on:
+     release:
+       types: [published]
+   permissions:
+     contents: write
+     id-token: write
+     attestations: write
+   jobs:
+     attest:
+       runs-on: ubuntu-latest
+       steps:
+         - uses: actions/checkout@v4
+         - uses: actions/attest-build-provenance@v2
+           with:
+             subject-path: |
+               main.js
+               manifest.json
+         - run: gh release upload "${{ github.event.release.tag_name }}" main.js manifest.json --clobber
+           env:
+             GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
