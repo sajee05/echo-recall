@@ -1,7 +1,7 @@
 {
   "id": "echo-recall",
   "name": "Echo Recall",
-  "version": "3.0.2",
+  "version": "3.0.3",
   "minAppVersion": "1.1.0",
   "description": "Active-recall revision with spaced repetition, deadlines, and chunked Anki export with differential sync.",
   "author": "sxjeel",
