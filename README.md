@@ -25,7 +25,6 @@ Echo Recall turns your own notes into an active-recall study tool. It turns your
 
 Flashcard apps (like Anki) chop your notes into tiny, out-of-context cards. You lose the "big picture." Echo Recall keeps your note whole and just hides pieces of it, step by step, so you're always recalling things *in context*.
 
----
 
 ## 2. Recall Modes
 
@@ -36,7 +35,6 @@ Go to **Settings → Echo Recall → Recall Mode** and pick ONE. Only one mode r
 | **Heading Recall** (default) | The entire content under one heading at a time | Concepts, ideas, theories, summaries and explanations |
 | **Fill in the Blank** | Individual words and phrases, turned into blanks (`____`) | Poetry, speeches, quotations, definitions, and anything you must get word-for-word |
 
----
 
 ## 3. Workflow (3 steps)
 
@@ -46,7 +44,6 @@ Go to **Settings → Echo Recall → Recall Mode** and pick ONE. Only one mode r
 
 That's it. 
 
----
 
 ## 4. How a Fill in the Blank session works
 
@@ -56,7 +53,6 @@ That's it.
 
 At the end, you grade how well you remembered it (Hard / Moderate / Easy), and the app decides when to show you this note again.
 
----
 
 ## 5. Scheduling — when will I see this note again?
 
@@ -70,7 +66,6 @@ Two modes, pick one in Settings:
 
 **Exam deadline:** You can set a deadline date on any note. If the deadline is close, Echo Recall automatically shortens the gap so you don't fall behind before your exam.
 
----
 
 ## 6. The Dashboard
 
@@ -83,7 +78,6 @@ Click the brain icon in the left sidebar to open it. It shows:
 - **Tag-wise view** — group notes by tag and revise a whole tag at once
 - **Archive** — notes you're done with, so they stop showing up as "due"
 
----
 
 ## 7. Exporting to Anki (optional)
 
@@ -106,13 +100,10 @@ If you'd rather revise on your phone using Anki, you can export your notes as An
 ### 7.3 Updating after you edit a note
 - Instead of re-exporting (which can create duplicates), run **"Differential update Anki cards"**. It only pushes what actually changed, and resets the card's Anki schedule for anything that changed.
 
----
-
 ## 8. Where is my data stored?
 
 Nowhere external. Everything: confidence, next revision date, deadline, tags, history = is saved as plain YAML **properties at the top of the note itself**. Your data lives in your vault, in your notes, no cloud.
 
----
 
 ## 9. All Settings simplified: 
 
@@ -134,7 +125,6 @@ Nowhere external. Everything: confidence, next revision date, deadline, tags, hi
 | **Exclude internal/external links, embeds** | Skip masking text inside `[[links]]`, `[links](url)`, or `![[embeds]]` |
 | **Custom regex** | Advanced: skip masking anything matching your own pattern |
 
----
 
 ## 10. Credits
 
