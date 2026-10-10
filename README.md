@@ -30,7 +30,7 @@
 </table>
 
 ![Obsidian](https://img.shields.io/badge/Obsidian-v1.4.0+-483699.svg?style=for-the-badge&logo=obsidian&logoColor=white)
-![Release](https://img.shields.io/badge/Release-v1.2.0-success.svg?style=for-the-badge)
+![Release](https://img.shields.io/badge/Release-v3.0.3-success.svg?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)
 
 
