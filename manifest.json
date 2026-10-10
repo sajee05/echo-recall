@@ -6,5 +6,5 @@
   "description": "Active-recall revision with spaced repetition, deadlines, and chunked Anki export with differential sync.",
   "author": "sxjeel",
   "authorUrl": "https://github.com/sajee05",
-  "isDesktopOnly": true
+  "isDesktopOnly": false
 }
