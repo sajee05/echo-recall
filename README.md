@@ -2,20 +2,37 @@
 
 > **Memorize your notes and paragraphs actively with spaced repetition and retrospective revision timetable directly inside Obsidian.**
 
-<table>
-<tr>
-<td width="50%">
-<img src="https://raw.githubusercontent.com/sajee05/echo-recall/main/banner.png" width="100%">
-</td>
-<td width="50%">
-<img src="https://raw.githubusercontent.com/sajee05/echo-recall/main/main.png" width="100%">
-</td>
-</tr>
+<table align="center" width="100%" style="border-collapse: collapse;">
+  <tr>
+    <td width="50%" valign="top" style="padding: 8px;">
+      <img src="https://raw.githubusercontent.com/sajee05/echo-recall/main/banner.png" width="100%" alt="Echo Recall Banner" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);" />
+    </td>
+    <td width="50%" valign="top" style="padding: 8px;">
+      <img src="https://github.com/user-attachments/assets/ccbb8069-a44a-43b9-b5e4-60281e04d272" width="100%" alt="echo-recall-1-why" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);" />
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top" style="padding: 8px;">
+      <img src="https://github.com/user-attachments/assets/62675937-8c06-438d-8544-9a846e6326c2" width="100%" alt="echo-recall-2-heading-recall" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);" />
+    </td>
+    <td width="50%" valign="top" style="padding: 8px;">
+      <img src="https://github.com/user-attachments/assets/a2415dc7-e8aa-41f6-b8c7-e92174f3c6b5" width="100%" alt="echo-recall-3-fill-in-the-blank" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);" />
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top" style="padding: 8px;">
+      <img src="https://github.com/user-attachments/assets/e92365da-398b-4a85-aff0-de4a559cc6ac" width="100%" alt="echo-recall-4-dashboard" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);" />
+    </td>
+    <td width="50%" valign="top" style="padding: 8px;">
+      <img src="https://github.com/user-attachments/assets/a39a4397-8d56-4aa6-95be-f19e685ee2d8" width="100%" alt="echo-recall-5-anki" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);" />
+    </td>
+  </tr>
 </table>
 
 ![Obsidian](https://img.shields.io/badge/Obsidian-v1.4.0+-483699.svg?style=for-the-badge&logo=obsidian&logoColor=white)
 ![Release](https://img.shields.io/badge/Release-v1.2.0-success.svg?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)
+
 
 Echo Recall turns your own notes into an active-recall study tool. It turns your long study notes into a dynamic memory game. You read your real note, parts of it get hidden, and you try to remember them before revealing.
 
