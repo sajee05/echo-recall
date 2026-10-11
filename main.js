@@ -248,15 +248,18 @@ var AnkiApiError = class extends Error {
 };
 async function ankiRequest(action, params = {}) {
   let brief = "";
+  let payloadLen = 0;
   try {
     const s = JSON.stringify(params);
+    payloadLen = s.length;
     brief = s.length > 300 ? `${s.slice(0, 300)}\u2026(${s.length} chars)` : s;
   } catch (_) {
     brief = "[unserializable]";
   }
   for (let attempt = 0; ; attempt++) {
     const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
-    const timer = ctrl ? setTimeout(() => ctrl.abort(), 6e4) : null;
+    const timeoutMs = Math.min(6e5, Math.max(6e4, Math.ceil(payloadLen / 1e3) * 150));
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs) : null;
     try {
       const response = await fetch(`http://127.0.0.1:${ANKI_CONNECT_PORT}`, {
         method: "POST",
@@ -269,7 +272,7 @@ async function ankiRequest(action, params = {}) {
       return result.result;
     } catch (e) {
       const isApi = e instanceof AnkiApiError;
-      if (!isApi && attempt < 1) {
+      if (!isApi && attempt < 1 && action !== "addNotes") {
         console.warn(`[Echo Recall][AnkiConnect] ${action} network error, retrying once...`, e);
         await new Promise((r) => setTimeout(r, 400));
         continue;
@@ -1656,14 +1659,25 @@ var EchoRecallPlugin = class extends import_obsidian.Plugin {
     const notes = payloads.map((p) => ({ deckName, modelName: ANKI_MODEL_NAME, fields: p.fields, tags, options: { allowDuplicate: false } }));
     let added = 0, skipped = 0;
     const BATCH_SIZE = 5;
-    for (let i = 0; i < notes.length; i += BATCH_SIZE) {
-      const batch = notes.slice(i, i + BATCH_SIZE);
-      setMsg(`Echo Recall: Sending notes ${i + 1} to ${Math.min(i + BATCH_SIZE, notes.length)} of ${notes.length}...`);
+    const MAX_BATCH_CHARS = 4e5;
+    let batchNo = 0;
+    for (let i = 0; i < notes.length; ) {
+      const batch = [];
+      let batchChars = 0;
+      while (i < notes.length && batch.length < BATCH_SIZE) {
+        const len = JSON.stringify(notes[i]).length;
+        if (batch.length > 0 && batchChars + len > MAX_BATCH_CHARS) break;
+        batch.push(notes[i]);
+        batchChars += len;
+        i++;
+      }
+      batchNo++;
+      setMsg(`Echo Recall: Sending notes ${i - batch.length + 1} to ${i} of ${notes.length}...`);
       try {
         const results = await ankiRequest("addNotes", { notes: batch });
         results.forEach((r) => r === null ? skipped++ : added++);
       } catch (batchErr) {
-        logAnkiError(`addNotes batch ${Math.floor(i / BATCH_SIZE) + 1}`, batchErr, { deckName, chunkIds: batch.map((b) => b.fields.ChunkID) });
+        logAnkiError(`addNotes batch ${batchNo}`, batchErr, { deckName, chunkIds: batch.map((b) => b.fields.ChunkID) });
         throw batchErr;
       }
       await ankiSleep(250);
