@@ -1,6 +1,6 @@
 {
   "name": "echo-recall",
-  "version": "3.0.3",
+  "version": "3.0.4",
   "description": "Active-recall revision with spaced repetition and Anki export for Obsidian.",
   "main": "main.js",
   "scripts": {
